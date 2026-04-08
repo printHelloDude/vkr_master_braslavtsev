@@ -1,15 +1,20 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 0.4.1
+Версия: 0.5.0 (Single File / Mono-Page)
 Направление: 27.04.03 «Системный анализ и управление»
 Автор: Браславцев Б.Э.
+
+Инструкция по запуску:
+1. Установите библиотеку: pip install streamlit
+2. Запустите: streamlit run app.py
 """
+
 import streamlit as st
 from datetime import datetime
 
 
 # =============================================================================
-# КОНФИГУРАЦИЯ СТРАНИЦЫ
+# 1. КОНФИГУРАЦИЯ СТРАНИЦЫ
 # =============================================================================
 st.set_page_config(
     page_title="СУП Легкой Промышленности",
@@ -20,35 +25,43 @@ st.set_page_config(
 
 
 # =============================================================================
-# УПРАВЛЕНИЕ СОСТОЯНИЕМ (SESSION STATE)
+# 2. УПРАВЛЕНИЕ СОСТОЯНИЕМ (SESSION STATE)
 # =============================================================================
-if 'authenticated' not in st.session_state:
-    st.session_state.authenticated = False
-if 'current_user' not in st.session_state:
-    st.session_state.current_user = None
+def init_session_state():
+    """Инициализация переменных сессии."""
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    if 'current_user' not in st.session_state:
+        st.session_state.current_user = None
+    if 'page' not in st.session_state:
+        st.session_state.page = "🏠 Главная"
+
+init_session_state()
 
 
 # =============================================================================
-# ФУНКЦИИ АУТЕНТИФИКАЦИИ
+# 3. ФУНКЦИИ АУТЕНТИФИКАЦИИ
 # =============================================================================
-def login():
-    """Форма входа в систему."""
-    st.markdown("## 🔐 Вход в систему")
+def login_page():
+    """Страница входа в систему."""
+    st.title("🔐 Вход в систему")
+    st.markdown("---")
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        username = st.text_input("Логин", key="login_username")
-        password = st.text_input("Пароль", type="password", key="login_password")
+        st.markdown("### Введите учетные данные")
+        username = st.text_input("Логин", key="login_user", placeholder="user")
+        password = st.text_input("Пароль", type="password", key="login_pass", placeholder="••••")
         
-        col_btn1, col_btn2, _ = st.columns([1, 1, 1])
+        col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
             if st.button("Войти", type="primary", use_container_width=True):
-                if username and password:
+                if username:
                     st.session_state.authenticated = True
                     st.session_state.current_user = username
                     st.rerun()
                 else:
-                    st.error("Введите логин и пароль")
+                    st.error("Введите логин")
         
         with col_btn2:
             if st.button("Войти как гость", use_container_width=True):
@@ -61,87 +74,112 @@ def logout():
     """Выход из системы."""
     st.session_state.authenticated = False
     st.session_state.current_user = None
+    st.session_state.page = "🏠 Главная"
     st.rerun()
 
 
 # =============================================================================
-# СТРАНИЦЫ ПРИЛОЖЕНИЯ
+# 4. СТРАНИЦЫ КОНТЕКСТОВ
 # =============================================================================
 def page_home():
     """Главная страница."""
     st.title("🏭 Система управления деятельностью предприятия")
     st.markdown("---")
     
+    st.success(f"Добро пожаловать, {st.session_state.current_user}!")
+    
     st.markdown("""
-    ### Добро пожаловать!
+    ### О прототипе
     
-    Это прототип системы управления для предприятия легкой промышленности.
+    Это система для управления процессами малого швейного предприятия.
+    Выберите раздел в меню слева для перехода к функционалу.
     
-    #### Доступные разделы:
-    - **📐 Конструирование** — управление техническими пакетами и лекалами
-    - **📅 Планирование** — календарное планирование производства
-    - **🏭 Производство** — учет выполнения операций и контроль качества
-    
-    ---
-    **Версия:** 0.4.1 | **Дата:** 2026
+    **Доступные разделы:**
+    - 📐 **Конструирование** — загрузка лекал, ТЗ, комментарии.
+    - 📅 **Планирование** — календарные планы, приоритеты.
+    - 🏭 **Производство** — учет брака, операций.
     """)
 
 
 def page_design():
-    """Страница: Конструирование."""
+    """Контекст: Конструирование."""
     st.title("📐 Конструирование")
     st.markdown("---")
-    st.info("Раздел находится в разработке")
+    
+    st.subheader("Создание новой модели")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.text_input("Артикул модели", placeholder="M-001")
+        st.text_input("Наименование", placeholder="Худи Базовое")
+    
+    with col2:
+        st.selectbox("Сезон", ["Весна-Лето", "Осень-Зима"])
+        st.selectbox("Категория", ["Верхняя одежда", "Брюки"])
+        
+    st.markdown("---")
+    st.subheader("Загрузка лекал (DXF/PDF)")
+    uploaded_files = st.file_uploader("Загрузить файлы", type=["dxf", "pdf"], accept_multiple_files=True)
+    
+    if uploaded_files:
+        st.success(f"Загружено файлов: {len(uploaded_files)}")
+        for file in uploaded_files:
+            st.caption(f"📄 {file.name} ({file.size} bytes)")
+    
+    if st.button("Сохранить модель", type="primary"):
+        st.toast("Модель сохранена (демо)", icon="✅")
 
 
 def page_planning():
-    """Страница: Планирование."""
+    """Контекст: Планирование."""
     st.title("📅 Планирование")
     st.markdown("---")
-    st.info("Раздел находится в разработке")
+    st.info("Раздел в разработке. Здесь будет календарный план производства.")
 
 
 def page_production():
-    """Страница: Производство."""
+    """Контекст: Производство."""
     st.title("🏭 Производство")
     st.markdown("---")
-    st.info("Раздел находится в разработке")
+    st.info("Раздел в разработке. Здесь будет учет операций и брака.")
 
 
 # =============================================================================
-# ОСНОВНАЯ ЛОГИКА ПРИЛОЖЕНИЯ
+# 5. ОСНОВНАЯ ЛОГИКА (MAIN)
 # =============================================================================
 def main():
-    """Основная функция приложения."""
+    """Главная функция приложения."""
     
-    # Проверка аутентификации
+    # Если не авторизован — показываем экран входа
     if not st.session_state.authenticated:
-        login()
+        login_page()
         return
-    
-    # Боковая панель
+
+    # Если авторизован — показываем интерфейс
     with st.sidebar:
         st.markdown(f"**👤 {st.session_state.current_user}**")
         st.markdown("---")
         
         # Навигация
-        page = st.radio(
+        st.session_state.page = st.radio(
             "Навигация",
             ["🏠 Главная", "📐 Конструирование", "📅 Планирование", "🏭 Производство"],
+            index=["🏠 Главная", "📐 Конструирование", "📅 Планирование", "🏭 Производство"].index(st.session_state.page),
             label_visibility="collapsed"
         )
         
         st.markdown("---")
-        st.button("🚪 Выйти", on_click=logout, use_container_width=True)
-    
-    # Отображение страниц
-    if page == "🏠 Главная":
+        if st.button("🚪 Выйти", use_container_width=True):
+            logout()
+
+    # Рендеринг выбранной страницы
+    if st.session_state.page == "🏠 Главная":
         page_home()
-    elif page == "📐 Конструирование":
+    elif st.session_state.page == "📐 Конструирование":
         page_design()
-    elif page == "📅 Планирование":
+    elif st.session_state.page == "📅 Планирование":
         page_planning()
-    elif page == "🏭 Производство":
+    elif st.session_state.page == "🏭 Производство":
         page_production()
 
 
