@@ -42,7 +42,6 @@ def check_authentication():
                 else:
                     st.error("Введите логин")
         return False
-    
     return True
 
 def logout():
@@ -56,17 +55,14 @@ def logout():
 # ============================================================================
 def main():
     """Основная функция приложения."""
-    # Проверка аутентификации (Требование R-SY-1)
     if not check_authentication():
         return
     
-    # Заголовок приложения
     st.title("Система управления деятельностью предприятия")
     st.markdown("---")
-    
+
     # Боковая панель с навигацией
     with st.sidebar:
-        # Навигация по ограниченным контекстам
         st.navigation([
             st.Page("pages/Main.py", title="Главная", icon="🏠"),
             st.Page("pages/Design.py", title="Конструирование", icon="📐"),
@@ -74,17 +70,10 @@ def main():
             st.Page("pages/Production.py", title="Производство", icon="🏭"),
         ])
         
-        # Отображение имени пользователя
         st.markdown(" ")
         st.markdown(f"**Пользователь:** {st.session_state.get('current_user', 'Гость')}")
-        
-        # Пустое пространство для прижатия кнопки к низу
         st.markdown("<div style='flex-grow: 1;'></div>", unsafe_allow_html=True)
-        
-        # Кнопка выхода в самом низу
         st.button("Выйти", use_container_width=True, on_click=logout)
-        
-        # Версия прототипа
         st.markdown(" ")
         st.caption("Версия прототипа: 0.2.1")
 
