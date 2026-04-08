@@ -13,7 +13,7 @@ from datetime import datetime
 # НАСТРОЙКИ СТРАНИЦЫ
 # ============================================================================
 st.set_page_config(
-    page_title="СУ Легкой Промышленности",
+    page_title="СУП Легкой Промышленности",
     page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -48,7 +48,6 @@ def check_authentication():
                     st.rerun()
                 else:
                     st.error("Введите логин")
-        
         return False
     
     return True
