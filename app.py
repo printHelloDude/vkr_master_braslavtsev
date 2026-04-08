@@ -82,9 +82,9 @@ def main():
         
         # Навигация по ограниченным контекстам
         st.navigation([
-            st.Page("pages/1_Конструирование.py", title="Конструирование", icon="📐"),
-            st.Page("pages/2_Планирование.py", title="Планирование", icon="📅"),
-            st.Page("pages/3_Производство.py", title="Производство", icon="🏭"),
+    st.Page("pages/Design.py", title="Конструирование", icon="📐"),
+    st.Page("pages/Planning.py", title="Планирование", icon="📅"),
+    st.Page("pages/Production.py", title="Производство", icon="🏭"),
         ])
         
         st.markdown("---")
