@@ -7,7 +7,6 @@
 [STUB_MARKER] - обозначает заглушку для последующей реализации
 [IMPLEMENTED] - обозначает реализованный функционал
 """
-
 import streamlit as st
 from datetime import datetime
 
@@ -82,9 +81,10 @@ def main():
         
         # Навигация по ограниченным контекстам
         st.navigation([
-    st.Page("pages/Design.py", title="Конструирование", icon="📐"),
-    st.Page("pages/Planning.py", title="Планирование", icon="📅"),
-    st.Page("pages/Production.py", title="Производство", icon="🏭"),
+            st.Page("pages/Main.py", title="Главная", icon="🏠"),
+            st.Page("pages/Design.py", title="Конструирование", icon="📐"),
+            st.Page("pages/Planning.py", title="Планирование", icon="📅"),
+            st.Page("pages/Production.py", title="Производство", icon="🏭"),
         ])
         
         st.markdown("---")
