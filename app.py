@@ -1,9 +1,8 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 0.2.0 (Skeleton)
+Версия: 0.2.1 (Skeleton)
 Направление: 27.04.03 «Системный анализ и управление»
 Автор: Браславцев Б.Э.
-
 [STUB_MARKER] - обозначает заглушку для последующей реализации
 [IMPLEMENTED] - обозначает реализованный функционал
 """
@@ -43,9 +42,12 @@ def check_authentication():
             
             if st.button("Войти", type="primary"):
                 # [STUB_MARKER] Здесь будет проверка учетных данных
-                st.session_state.authenticated = True
-                st.session_state.current_user = username
-                st.rerun()
+                if username:  # Простая проверка
+                    st.session_state.authenticated = True
+                    st.session_state.current_user = username
+                    st.rerun()
+                else:
+                    st.error("Введите логин")
         
         return False
     
@@ -76,9 +78,6 @@ def main():
     
     # Боковая панель с навигацией
     with st.sidebar:
-        st.markdown(f"**Пользователь:** {st.session_state.get('current_user', 'Гость')}")
-        st.markdown("---")
-        
         # Навигация по ограниченным контекстам
         st.navigation([
             st.Page("pages/Main.py", title="Главная", icon="🏠"),
@@ -88,13 +87,19 @@ def main():
         ])
         
         st.markdown("---")
+        
+        # Отображение имени пользователя (если авторизован)
+        if st.session_state.get('current_user'):
+            st.markdown(f"**Пользователь:** {st.session_state.current_user}")
+            st.markdown("---")
+        
+        # Кнопка выхода в самом низу
         if st.button("Выйти", use_container_width=True):
             logout()
         
-        # Системная информация (Требование R-SY-5)
+        # Версия прототипа
         st.markdown("---")
-        st.caption(f"Версия прототипа: 0.2.0")
-        st.caption(f"Время сессии: {datetime.now().strftime('%H:%M:%S')}")
+        st.caption("Версия прототипа: 0.2.1")
 
 if __name__ == "__main__":
     main()
