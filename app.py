@@ -13,7 +13,7 @@ from datetime import datetime
 # НАСТРОЙКИ СТРАНИЦЫ
 # ============================================================================
 st.set_page_config(
-    page_title="СУП Легкой Промышленности",
+    page_title="СУ Легкой Промышленности",
     page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded"
