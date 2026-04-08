@@ -42,7 +42,7 @@ def check_authentication():
             
             if st.button("Войти", type="primary"):
                 # [STUB_MARKER] Здесь будет проверка учетных данных
-                if username:  # Простая проверка
+                if username:
                     st.session_state.authenticated = True
                     st.session_state.current_user = username
                     st.rerun()
@@ -67,7 +67,6 @@ def main():
     Основная функция приложения.
     Реализует навигацию по ограниченным контекстам (Раздел 2 ВКР).
     """
-    
     # Проверка аутентификации (Требование R-SY-1)
     if not check_authentication():
         return
@@ -86,19 +85,18 @@ def main():
             st.Page("pages/Production.py", title="Производство", icon="🏭"),
         ])
         
-        st.markdown("---")
+        # Отображение имени пользователя (без лишних линий)
+        st.markdown("")  # Пустая строка для отступа
+        st.markdown(f"**Пользователь:** {st.session_state.get('current_user', 'Гость')}")
         
-        # Отображение имени пользователя (если авторизован)
-        if st.session_state.get('current_user'):
-            st.markdown(f"**Пользователь:** {st.session_state.current_user}")
-            st.markdown("---")
+        # Пустое пространство для прижатия кнопки к низу
+        st.markdown("<div style='flex-grow: 1;'></div>", unsafe_allow_html=True)
         
         # Кнопка выхода в самом низу
-        if st.button("Выйти", use_container_width=True):
-            logout()
+        st.button("Выйти", use_container_width=True, on_click=logout)
         
-        # Версия прототипа
-        st.markdown("---")
+        # Версия прототипа в самом низу (без лишних линий)
+        st.markdown("")
         st.caption("Версия прототипа: 0.2.1")
 
 if __name__ == "__main__":
