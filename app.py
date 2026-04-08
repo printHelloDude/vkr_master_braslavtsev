@@ -13,7 +13,7 @@ from datetime import datetime
 # НАСТРОЙКИ СТРАНИЦЫ
 # ============================================================================
 st.set_page_config(
-    page_title="СУП Легкой Промышленности",
+    page_title="СУ Легкой Промышленности",
     page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -22,8 +22,14 @@ st.set_page_config(
 # ============================================================================
 # [STUB_MARKER] КОМПОНЕНТ АУТЕНТИФИКАЦИИ (Требование R-SY-1)
 # ============================================================================
+# TODO: Реализовать полноценную аутентификацию с сессиями
+# TODO: Добавить таймаут сессии 30 минут (Требование R-SY-2)
+
 def check_authentication():
-    """Заглушка проверки аутентификации."""
+    """
+    Заглушка проверки аутентификации.
+    В текущей версии всегда возвращает True.
+    """
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
     
@@ -35,13 +41,16 @@ def check_authentication():
             password = st.text_input("Пароль", type="password", key="login_password")
             
             if st.button("Войти", type="primary"):
+                # [STUB_MARKER] Здесь будет проверка учетных данных
                 if username:
                     st.session_state.authenticated = True
                     st.session_state.current_user = username
                     st.rerun()
                 else:
                     st.error("Введите логин")
+        
         return False
+    
     return True
 
 def logout():
@@ -54,7 +63,10 @@ def logout():
 # ОСНОВНОЕ ПРИЛОЖЕНИЕ
 # ============================================================================
 def main():
-    """Основная функция приложения."""
+    """
+    Основная функция приложения.
+    Реализует навигацию по ограниченным контекстам (Раздел 2 ВКР).
+    """
     # Проверка аутентификации (Требование R-SY-1)
     if not check_authentication():
         return
@@ -62,10 +74,10 @@ def main():
     # Заголовок приложения
     st.title("Система управления деятельностью предприятия")
     st.markdown("---")
-
+    
     # Боковая панель с навигацией
     with st.sidebar:
-        # Навигация по страницам
+        # Навигация по ограниченным контекстам
         st.navigation([
             st.Page("pages/Main.py", title="Главная", icon="🏠"),
             st.Page("pages/Design.py", title="Конструирование", icon="📐"),
@@ -73,16 +85,18 @@ def main():
             st.Page("pages/Production.py", title="Производство", icon="🏭"),
         ])
         
-        st.markdown("  ")
+        # Отображение имени пользователя (без лишних линий)
+        st.markdown("")  # Пустая строка для отступа
         st.markdown(f"**Пользователь:** {st.session_state.get('current_user', 'Гость')}")
         
-        # Пустое пространство
+        # Пустое пространство для прижатия кнопки к низу
         st.markdown("<div style='flex-grow: 1;'></div>", unsafe_allow_html=True)
         
-        # Кнопка выхода
+        # Кнопка выхода в самом низу
         st.button("Выйти", use_container_width=True, on_click=logout)
         
-        st.markdown("  ")
+        # Версия прототипа в самом низу (без лишних линий)
+        st.markdown("")
         st.caption("Версия прототипа: 0.2.1")
 
 if __name__ == "__main__":
