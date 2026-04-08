@@ -48,6 +48,7 @@ def check_authentication():
                     st.rerun()
                 else:
                     st.error("Введите логин")
+        
         return False
     
     return True
