@@ -1,11 +1,11 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 0.7.0 (Single File + SQLite + Registry Pattern + Context Switching)
+Версия: 0.8.0 (Single File + SQLite + Registry Pattern + Delete via Archive)
 Направление: 27.04.03 «Системный анализ и управление»
 Автор: Браславцев Б.Э.
 
 Реализованные требования:
-- R-SY-1: Обязательная аутентификация
+- R-SY-1: Аутентификация
 - R-SY-2: Таймаут сессии 30 минут
 - R-DE-1: Загрузка DXF/PDF (≤50 МБ)
 - R-DE-2: Автофиксация даты/времени версии
@@ -16,6 +16,7 @@
 - R-PL-4: Уведомления об изменениях плана
 - R-PR-1: Фиксация выполнения операций
 - R-PR-8: Сигналы при превышении брака > 5%
+- R-DE-7: Удаление через архивирование (status='archived')
 """
 
 import streamlit as st
@@ -45,7 +46,7 @@ def db_init():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Таблица пользователей (для аутентификации)
+    # Таблица пользователей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +56,7 @@ def db_init():
         )
     """)
     
-    # Таблица моделей (R-DE-1, R-DE-2)
+    # Таблица моделей
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS models (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +71,7 @@ def db_init():
         )
     """)
     
-    # Таблица технических пакетов (версионирование, R-DE-5)
+    # Таблица технических пакетов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tech_packages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +85,7 @@ def db_init():
         )
     """)
     
-    # Таблица файлов (R-DE-1)
+    # Таблица файлов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,11 +95,12 @@ def db_init():
             file_size INTEGER,
             mime_type TEXT,
             uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'active',
             FOREIGN KEY (tech_package_id) REFERENCES tech_packages(id)
         )
     """)
     
-    # Таблица комментариев (R-DE-6)
+    # Таблица комментариев
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS comments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,11 +108,12 @@ def db_init():
             author TEXT NOT NULL,
             text TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'active',
             FOREIGN KEY (tech_package_id) REFERENCES tech_packages(id)
         )
     """)
     
-    # Таблица производственных планов (R-PL-3, R-PL-4)
+    # Таблица производственных планов
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS production_plans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,9 +124,9 @@ def db_init():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """)
+ """)
     
-    # Таблица операций (R-PR-1)
+    # Таблица операций
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS operations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,7 +140,7 @@ def db_init():
         )
     """)
     
-    # Таблица брака (R-PR-8)
+    # Таблица брака
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS defects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +149,7 @@ def db_init():
             quantity INTEGER DEFAULT 0,
             description TEXT,
             reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            status TEXT DEFAULT 'active',
             FOREIGN KEY (operation_id) REFERENCES operations(id)
         )
     """)
@@ -162,7 +166,7 @@ def db_get_connection():
 
 
 def db_get_models(status_filter=None):
-    """Получение списка моделей."""
+    """Получение списка моделей (R-DE-7: archived фильтрация)."""
     conn = db_get_connection()
     cursor = conn.cursor()
     
@@ -184,6 +188,7 @@ def db_get_models(status_filter=None):
                    MAX(tp.created_at) as last_update
             FROM models m
             LEFT JOIN tech_packages tp ON m.id = tp.model_id
+            WHERE m.status != 'archived'
             GROUP BY m.id
             ORDER BY m.created_at DESC
         """)
@@ -202,6 +207,11 @@ def db_save_model(article, name, season, category, created_by):
     cursor = conn.cursor()
     
     try:
+        # Проверка уникальности артикула (R-DE-4, R-DE-7)
+        cursor.execute("SELECT id FROM models WHERE article = ?", (article,))
+        if cursor.fetchone():
+            raise ValueError(f"Модель с артикулом '{article}' уже существует")
+        
         # Создание модели
         cursor.execute("""
             INSERT INTO models (article, name, season, category, status, current_version)
@@ -232,7 +242,7 @@ def db_get_tech_package(package_id):
     cursor.execute("""
         SELECT tp.*, m.article, m.name 
         FROM tech_packages tp
-        JOIN models m ON tp.model_id = m.id
+        JOIN models m ON tp.model_id = m
         WHERE tp.id = ?
     """, (package_id,))
     row = cursor.fetchone()
@@ -243,7 +253,7 @@ def db_get_tech_package(package_id):
 def db_approve_package(package_id):
     """
     Утверждение технического пакета.
-    R-DE-4: Блокировка редактирования
+    R-DE-4
     """
     conn = db_get_connection()
     cursor = conn.cursor()
@@ -295,7 +305,8 @@ def db_create_new_version(model_id, created_by):
     
     # Архивация старых версий (R-DE-5: хранение не более 5)
     cursor.execute("""
-        DELETE FROM tech_packages 
+        UPDATE tech_packages 
+        SET status = 'archived'
         WHERE model_id = ? AND version < ?
         ORDER BY version ASC
         LIMIT (SELECT COUNT(*) - 5 FROM tech_packages WHERE model_id = ?)
@@ -314,8 +325,8 @@ def db_save_file(package_id, filename, file_path, file_size, mime_type):
     conn = db_get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO files (tech_package_id, filename, file_path, file_size, mime_type)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO files (tech_package_id, filename, file_path, file_size, mime_type, status)
+        VALUES (?, ?, ?, ?, ?, 'active')
     """, (package_id, filename, file_path, file_size, mime_type))
     file_id = cursor.lastrowid
     conn.commit()
@@ -324,12 +335,12 @@ def db_save_file(package_id, filename, file_path, file_size, mime_type):
 
 
 def db_get_package_files(package_id):
-    """Получение списка файлов пакета."""
+    """Получение списка файлов пакета (только active)."""
     conn = db_get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM files 
-        WHERE tech_package_id = ?
+        WHERE tech_package_id = ? AND status = 'active'
         ORDER BY uploaded_at DESC
     """, (package_id,))
     rows = cursor.fetchall()
@@ -345,8 +356,8 @@ def db_add_comment(package_id, author, text):
     conn = db_get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO comments (tech_package_id, author, text)
-        VALUES (?, ?, ?)
+        INSERT INTO comments (tech_package_id, author, text, status)
+        VALUES (?, ?, ?, 'active')
     """, (package_id, author, text))
     comment_id = cursor.lastrowid
     conn.commit()
@@ -355,12 +366,12 @@ def db_add_comment(package_id, author, text):
 
 
 def db_get_comments(package_id):
-    """Получение комментариев пакета."""
+    """Получение комментариев пакета (только active)."""
     conn = db_get_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM comments 
-        WHERE ?
+        WHERE tech_package_id = ? AND status = 'active'
         ORDER BY created_at DESC
     """, (package_id,))
     rows = cursor.fetchall()
@@ -368,46 +379,41 @@ def db_get_comments(package_id):
     return [dict(row) for row in rows]
 
 
-def db_save_plan(date_from, date_to, capacity_load):
-    """Создание производственного плана (R-PL-3)."""
+# ———— УДАЛЕНИЕ ЧЕРЕЗ АРХИВИРОВАНИЕ (R-DE-7) ————
+def db_delete_model(model_id):
+    """Архивирование модели (R-DE-7)."""
     conn = db_get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO production_plans (date_from, date_to, capacity_load)
-        VALUES (?, ?, ?)
-    """, (date_from, date_to, capacity_load))
-    plan_id = cursor.lastrowid
+    cursor.execute("UPDATE models SET status = 'archived' WHERE id = ?", (model_id,))
     conn.commit()
     conn.close()
-    return plan_id
 
 
-def db_save_operation(plan_id, worker, operation_name, quantity):
-    """Фиксация выполнения операции (R-PR-1)."""
+def db_delete_tech_package(package_id):
+    """Архивирование технического пакета (R-DE-7)."""
     conn = db_get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO operations (plan_id, worker, operation_name, quantity, status, completed_at)
-        VALUES (?, ?, ?, ?, 'completed', CURRENT_TIMESTAMP)
-    """, (plan_id, worker, operation_name, quantity))
-    op_id = cursor.lastrowid
+    cursor.execute("UPDATE tech_packages SET status = 'archived' WHERE id = ?", (package_id,))
     conn.commit()
     conn.close()
-    return op_id
 
 
-def db_report_defect(operation_id, defect_type, quantity, description=""):
-    """Фиксация брака (R-PR-8)."""
+def db_delete_file(file_id):
+    """Архивирование файла (R-DE-7)."""
     conn = db_get_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO defects (operation_id, defect_type, quantity, description)
-        VALUES (?, ?, ?, ?)
-    """, (operation_id, defect_type, quantity, description))
-    defect_id = cursor.lastrowid
+    cursor.execute("UPDATE files SET status = 'archived' WHERE id = ?", (file_id,))
     conn.commit()
     conn.close()
-    return defect_id
+
+
+def db_delete_comment(comment_id):
+    """Архивирование комментария (R-DE-7)."""
+    conn = db_get_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE comments SET status = 'archived' WHERE id = ?", (comment_id,))
+    conn.commit()
+    conn.close()
 
 
 def db_check_defect_alert(plan_id):
@@ -421,7 +427,7 @@ def db_check_defect_alert(plan_id):
                SUM(d.quantity) as defect_qty
         FROM operations o
         LEFT JOIN defects d ON o.id = d.operation_id
-        WHERE o.plan_id = ?
+        WHERE o.plan_id = ? AND d.status = 'active'
     """, (plan_id,))
     result = cursor.fetchone()
     
@@ -431,7 +437,7 @@ def db_check_defect_alert(plan_id):
     conn.close()
     
     if total_qty > 0:
-        defect_rate = (defect_qty / total_qty) * 110  # *110 для 110% от брака
+        defect_rate = (defect_qty / total_qty) * 100
         return defect_rate > 5.0  # > 5% брака
     return False
 
@@ -443,13 +449,7 @@ def db_check_defect_alert(plan_id):
 def render_registry(entity_name, columns, rows, actions_callback, show_archived=False):
     """
     Универсальный компонент реестра/архива.
-    
-    Args:
-        entity_name: Название сущности
-        columns: Список колонок для отображения
-        rows: Список словарей с данными
-        actions_callback: Функция для рендеринга кнопок действий
-        show_archived: Показывать архивные записи
+    R-DE-7: добавлена кнопка "Удалить" с архивированием.
     """
     st.subheader(f"📋 {entity_name}")
     
@@ -475,12 +475,13 @@ def render_registry(entity_name, columns, rows, actions_callback, show_archived=
             with col2:
                 status = row.get('status', 'unknown')
                 status_emoji = {
-                    'draft': '📝',
+                    '📝',
                     'in_review': '👀',
                     'approved': '✅',
                     'archived': '📦',
                     'completed': '✅',
-                    'pending': '⏳'
+                    'pending': '⏳',
+                    'active': '🟢'
                 }.get(status, '📄')
                 st.markdown(f"{status_emoji} **Статус:** {status}")
                 version = row.get('current_version', row.get('version', 1))
@@ -507,7 +508,7 @@ def render_registry(entity_name, columns, rows, actions_callback, show_archived=
 def page_design():
     """
     Контекст: Конструирование.
-    R-DE-1, R-DE-2, R-DE-4, R-DE-5, R-DE-6
+    R-DE-1, R-DE-2, R-DE-4, R-DE-5, R-DE-6, R-DE-7
     """
     st.title("📐 Конструирование")
     st.markdown("---")
@@ -520,28 +521,31 @@ def page_design():
         models = db_get_models()
         
         def model_actions(model):
-            """Кнопки действий для модели."""
+            """Кнопки действий для модели (включая удаление)."""
             package = db_get_tech_package(model.get('id'))
             
-            if st.button("📄 Открыть", key=f"open_{model['id']}"):
-                st.session_state.selected_model = model
-                st.session_state.show_model_details = True
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("📄 Открыть", key=f"open_{model['id']}", use_container_width=True):
+                    st.session_state.selected_model = model
+                    st.session_state.show_model_details = True
             
-            if model.get('status') != 'approved':
-                if st.button("✅ Утвердить", key=f"approve_{model['id']}"):
-                    db_approve_package(package['id'])
-                    st.success(f"Модель {model['article']} утверждена")
-                    st.rerun()
+            with col2:
+                if model.get('status') != 'approved':
+                    if st.button("✅ Утвердить", key=f"approve_{model['id']}", use_container_width=True):
+                        db_approve_package(package['id'])
+                        st.success(f"Модель {model['article']} утверждена")
+                        st.rerun()
             
-            if model.get('status') == 'approved':
-                if st.button("🔄 Создать v2", key=f"newver_{model['id']}"):
-                    db_create_new_version(model['id'], st.session_state.current_user)
-                    st.success("Создана новая версия")
+            with col3:
+                if st.button("🗑️ Удалить", key=f"del_model_{model['id']}", use_container_width=True, type="secondary"):
+                    db_delete_model(model['id'])
+                    st.success(f"Модель {model['article']} архивирована")
                     st.rerun()
         
         render_registry(
             entity_name="Модели",
-            columns=['article', 'name', 'status', 'current_version'],
+            columns=['article', 'name', 'status'],  # только ключевые
             rows=models,
             actions_callback=model_actions
         )
@@ -594,7 +598,14 @@ def page_design():
                     if files:
                         st.markdown("📎 **Файлы:**")
                         for file in files:
-                            st.caption(f"📄 {file['filename']} ({file['file_size'] / 1024:.1f} КБ)")
+                            col_f1, col_f2 = st.columns([3, 1])
+                            with col_f1:
+                                st.caption(f"📄 {file['filename']} ({file['file_size'] / 1024:.1f} КБ)")
+                            with col_f2:
+                                if st.button("🗑️", key=f"del_file_{file['id']}", help="Удалить файл"):
+                                    db_delete_file(file['id'])
+                                    st.success("Файл архивирован")
+                                    st.rerun()
                             
                             # Кнопка скачивания
                             with open(file['file_path'], 'rb') as f:
@@ -603,7 +614,8 @@ def page_design():
                                     data=f,
                                     file_name=file['filename'],
                                     mime=file['mime_type'],
-                                    key=f"dl_{file['id']}"
+                                    key=f"dl_{file['id']}",
+                                    use_container_width=True
                                 )
                 
                 # Комментарии (R-DE-6)
@@ -615,14 +627,21 @@ def page_design():
                     with st.chat_message(name=comment['author']):
                         st.markdown(comment['text'])
                         st.caption(f"{comment['author']} • {comment['created_at']}")
+                        
+                        # Кнопка удаления комментария
+                        if st.button("🗑️", key=f"del_comm_{comment['id']}", help="Удалить комментарий"):
+                            db_delete_comment(comment['id'])
+                            st.success("Комментарий архивирован")
+                            st.rerun()
                 
                 # Форма добавления комментария
                 if package['status'] != 'approved':
                     comment_text = st.text_area(
                         "Добавить комментарий",
-                        key=f"comment_input_{package['id']}"
+                        key=f"comment_input_{package['id']}",
+                        placeholder="Введите текст комментария..."
                     )
-                    if st.button("Отправить", key=f"send_comment_{package['id']}"):
+                    if st.button("Отправить", key=f"send_comment_{package['id']}", use_container_width=True, type="secondary"):
                         if comment_text.strip():
                             db_add_comment(package['id'], st.session_state.current_user, comment_text.strip())
                             st.success("Комментарий добавлен")
@@ -635,7 +654,7 @@ def page_design():
         with st.form(key="create_model_form"):
             col1, col2 = st.columns(2)
             
-            with col1:
+ with col:
                 article = st.text_input("Артикул модели *", placeholder="M-001")
                 name = st.text_input("Наименование *", placeholder="Худи Базовое")
             
@@ -663,7 +682,7 @@ def page_design():
 def page_planning():
     """
     Контекст: Планирование.
-    R-PL-3, R-PL-4
+    R-PL-3, R-PL-4, R-PR-8
     """
     st.title("📅 Планирование")
     st.markdown("---")
@@ -692,7 +711,7 @@ def page_planning():
     
     conn = db_get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM production_plans ORDER BY date_from DESC")
+    cursor.execute("SELECT * FROM production_plans WHERE status != 'archived' ORDER BY date_from DESC")
     plans = cursor.fetchall()
     conn.close()
     
@@ -710,9 +729,12 @@ def page_planning():
                 st.progress(load_pct / 100, text=f"Загрузка: {load_pct}%")
             
             with col3:
-                if st.button("📊 Открыть", key=f"open_plan_{plan_dict['id']}"):
+                if st.button("📊 Открыть", key=f"open_plan_{plan_dict['id']}", use_container_width=True):
                     st.session_state.selected_plan = plan_dict
                     st.session_state.show_plan_details = True
+                if st.button("🗑️", key=f"del_plan_{plan_dict['id']}", help="Архивировать план", type="secondary"):
+                    # TODO: реализовать архивирование плана (R-DE-7)
+                    st.warning("Архивирование плана — в следующей версии")
     
     if st.session_state.get('show_plan_details') and st.session_state.get('selected_plan'):
         plan = st.session_state.selected_plan
@@ -748,7 +770,7 @@ def page_planning():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM operations 
-            WHERE plan_id = ? 
+            WHERE plan_id = ? AND status != 'archived'
             ORDER BY completed_at DESC
         """, (plan['id'],))
         ops = cursor.fetchall()
@@ -885,7 +907,7 @@ def main():
         # Навигация (SPA, без перезагрузки)
         page = st.radio(
             "Навигация",
-            ["🏠 Главная", "📐 Конструирование", "📅 Планирование", "🏭 Производство"],
+            ["🏠 Главная", "📐струирование", "📅 Планирование", "🏭 Производство"],
             label_visibility="collapsed"
         )
         
@@ -896,7 +918,7 @@ def main():
             st.rerun()
         
         st.markdown("---")
-        st.caption("Версия: 0.7.0")
+        st.caption("Версия: 0.8.0")
     
     # Рендеринг страниц
     if page == "🏠 Главная":
@@ -920,11 +942,12 @@ def main():
         - ✅ Фиксация выполнения операций
         - ✅ Отслеживание брака и сигнализация
         - ✅ Уведомления об изменениях
-        
+        - ✅ Удаление через архивирование (статус = 'archived')
+
         **Текущий контекст:**
         """)
         
-        # Быстрая навигация по контекстам
+        # Быстрая навигация
         col1, col2, col3 = st.columns(3)
         with col1:
             if st.button("🎨 Конструирование", use_container_width=True):
