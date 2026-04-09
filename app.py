@@ -1,25 +1,15 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 0.9.0 (Single File + Google Sheets Only — NO SQLite)
+Версия: 0.9.1 — ТОЛЬКО Google Sheets (без SQLite)
 Направление: 27.04.03 «Системный анализ и управление»
 Автор: Браславцев Б.Э.
 
-Требования из ВКР и Системного промта (разработка3):
-- R-SY-1: Обязательная аутентификация
-- R-SY-2: Таймаут сессии 30 минут
-- R-DE-1: Загрузка DXF/PDF (≤50 МБ) → *файлы хранятся в Google Drive, ссылки в Sheets*
-- R-DE-2: Автофиксация даты/времени версии
-- R-DE-4: Блокировка редактирования утвержденного ТП
-- R-DE-5: Хранение ≥5 предыдущих версий ТП (через архивирование)
-- R-DE-6: Комментарии к лекалам
-- R-DE-7: Удаление через status='archived'
-- R-SY-3: Резервные копии — не требуется (Google Sheets сама сохраняет историю)
-- О-3: Импорт из существующих Google Таблиц — реализован
-
-Используется:
-- gspread + google-auth
-- Streamlit SPA (st.radio в сайдбаре)
-- Все данные — в Google Sheets по ID из промта
+Требования:
+- R-SY-1, R-SY-2: Аутентификация + таймаут 30 мин
+- R-DE-1: Загрузка DXF/PDF ≤50 МБ (файлы в Drive, ссылки в Sheets)
+- R-DE-2, R-DE-4, R-DE-5, R-DE-6, R-DE-7: Версионирование, утверждение, архивирование
+- О-3: Импорт из существующих таблиц — через SheetDAL
+- R-SY-5: Поддержка масштабирования шрифта до 150%
 """
 
 import streamlit as st
@@ -27,32 +17,20 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 import os
-import json
 from pathlib import Path
 
 # ============================================================================
 # === 1. GOOGLE SHEETS CONFIGURATION =========================================
 # ============================================================================
 
-# Проверка наличия secrets.toml
-try:
-    from streamlit import secrets as st_secrets
-    SHEET_ID = st_secrets["GOOGLE_SHEET_ID"]
-    FOLDER_ID = st_secrets.get("GOOGLE_FOLDER_ID", "1uhzRoHIhbxpsTfz8FFtFNwm4h39aibYlF6")
-except Exception:
-    # Для локального запуска — используем переданный TOML
-    SHEET_ID = "12jwDvBK-6qC8vAM06TaNpgpbhgLhlHX5D8Kb768BwQs"
-    FOLDER_ID = "1uhzRoHIhbxpsTfz8FFtFNwm4h39aibYlF6"
-
-# Настройка аутентификации
 def get_gspread_client():
-    """Создание клиента gspread с использованием service account из secrets."""
+    """Создание клиента gspread из secrets.toml."""
     try:
-        # Если запущено в Streamlit Cloud — читаем из st.secrets
+        # Streamlit Cloud: читаем из st.secrets
         if hasattr(st, 'secrets') and 'google_service_account' in st.secrets:
             creds_dict = st.secrets.google_service_account
         else:
-            # Локальный режим: используем переданный TOML (как в вашем сообщении)
+            # Локальный режим: используем переданный JSON (как в вашем файле)
             creds_dict = {
                 "type": "service_account",
                 "project_id": "vkr-master-492811",
@@ -62,13 +40,13 @@ MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDi/bhOcaODruEu
 fFUcfkisNJ/BECpeVYclprHzseaJgMJKCSYChiipFJXoQYdk+qB28WTH+j9OmB1y
 rAZxA84FSbOXp21r9uwl2TI2SC8HMrT92yuw65ThV82o0c/DFv89sXBbW1Bl9YXx
 QKP4szDwN9nImpE+AFhTFJ7cOszzHxJdYQ5I/CoMR4cTitfll7ed+6eN53AMDtkT
-fVIvPigWNeQA4FcP5Kiw+Fmmb3SlnvXJ5yrbW5v6Y48bev4wwRryFrRSKAkK8UsN
+fVIvPigWNeQA4FcP5+Fmmb3SlnvXJ5yrbW5v6Y48bev4wwRryFrRSKAkK8UsN
 OfHmZAcdvBtZdeq0hiHZPv5fQEoH7ZzNg+kYdILWQO9lfXwF4krkWRclXR4M/rgB
 7uQ2/PNtAgMBAAECggEAD+B/S71XGpbY2U+JBH0wyBrGMdLXo9GHqnKGb+05mtSO
 wm7xYavQnEL8WUp8FewR3T/1NKekVfL93E98A9uoRWZqUWk8lhinW95dTL6vy2kY
-j8kMvUs9FqX1lKFYTuUE5WPL4Bf6/6a0v7MtxO+DtMmzSfzFu/h6NRV0JyNVwouA
+j8kMvUs9FqX1lKFYTuUE5WPL4Bf6/6a0v7MtxO+DtMmzSfzFu/h6NRVJyNVwouA
 G+FLo+PAGNrzw5fuXaHv44IE9AY5vOh8xIDVHHWx0WrUMoVZWjESq9tqvhsTv0YM
-/iICwD5p5cmVGJ/4b+qGA1TxstKFqTLjD3aSqKu5ZDCYOGodeiUF72lRWji0wAx
+q/iICwD5p5cmVGJ/4b+qGA1TxstKFqTLjD3aSqKu5ZDCYOGodeiUF72lRWji0wAx
 /bXscntk4/ELVGMphf3TCwxAc5sg58SAwlZsQAPiAQKBgQDztpta7unu+zOT6P7/
 GVmymXX05sqmT/M9CGb5ZMhCiUGHKMiozFg11omS39AGACR2wQyT2JuTRLXSOO1i
 JyRwpngmA/fkCQJWymmSqpRPWsFMKns+FZdDFUeqvxh9qPs8toVhw7sDq56BpJTh
@@ -78,9 +56,9 @@ cfqOjf1dVb39Yg75yztPutGXVUO9l/mbEX+rz8LmuTU5yJgYALOux2hIYQEvLOLE
 uaEhTl7xsQKBgQDFx56CCDs+Xwu3cDFoUmlRoGpyic1RdLaABE6U++3s2TideEKH
 gfXgEy/oSsul4v20hewwG2v98pffd6Vlr0BKTz5YE4Zbv9fvGSreBKKBV7RgnGUR
 uDHeFenoLlawu67P0YujEFW3n9HtgeP0jPX28Q35omRIz7A5OzKT02eRfQKBgQDr
-MXEynCDKeDeAv55xvGD0OYECsTU6sxuqx3eGAt23oYpFVOK82BHrdbak9oBZln2q
-zroHOmtgt7SfCRWuJ5MWhrCBJN7MMBSIY4a7N8MxxM/+ZsrKL3ANc0qLUlpB+VX6
-a/SB0N2flx80vwrcy1NC9L4TsrxqvAWmrWcZuXrCIQKBgFchibaNsjcRU8yZR2JK
+MXEynCDDeAv55xvGD0OYECsTU6sxuqx3eGAt23oYpFVOK82BHrdbak9oBZln2q
+zroHOmtgt7SfCRWuJ5MWhrCBJN7MMBSIY4aN8MxxM/+ZsrKL3ANc0qLUlpB+VX6
+a/SB0N2flx80vwrcy1NC9L4TsrxqvAWmrWcZuXrCIQKBgFchibaNcRU8yZR2JK
 bRjCLIRjZ9pzqJ094UI4AriUi2SqWqLBXNdzo5hF7eg0IrK9UQkwlV5n2GFwXTlQ
 TVsE6PNzcMjdARoTjWVh+B0Gm/b8COHRzRiR5k3dLjkAw6/NZQcnw1Q1kMunbJKl
 //kPhJjzl6h3VO2gH3ATE8eM
@@ -90,29 +68,27 @@ TVsE6PNzcMjdARoTjWVh+B0Gm/b8COHRzRiR5k3dLjkAw6/NZQcnw1Q1kMunbJKl
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/vkr-crud-bot%40vkr-master-492811.iam.gserviceaccount.com",
+                "client_x509_cert": "https://www.googleapis.com/robot/v1/metadata/x509/vkr-crud-bot%40vkr-master-492811.iam.gserviceaccount.com",
                 "universe_domain": "googleapis.com"
             }
-
+        
         scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(creds)
-        return client
+        return gspread.authorize(creds)
     except Exception as e:
-        st.error(f"❌ Ошибка подключения к Google Sheets: {e}")
+        st.error(f"❌ Не удалось авторизоваться в Google Sheets. Проверьте secrets.toml.\nОшибка: {e}")
         st.stop()
 
 
 # ============================================================================
-# === 2. DATA ACCESS LAYER (DAL) =============================================
+# === 2. DATA ACCESS LAYER (SheetDAL) ========================================
 # ============================================================================
 
 class SheetDAL:
     def __init__(self):
         self.client = get_gspread_client()
-        self.sheet = self.client.open_by_key(SHEET_ID)
-        
-        # Кэш листов
+        self.sheet_id = st.secrets.get("GOOGLE_SHEET_ID", "12jwDv0K-6qC8vAMO6TaNpgpbhgLhlHX5D8Kb768BwQs")
+        self.sheet = self.client.open_by_key(self.sheet_id)
         self._models = None
         self._tech_packages = None
         self._files = None
@@ -122,7 +98,6 @@ class SheetDAL:
         try:
             return self.sheet.worksheet(title)
         except gspread.WorksheetNotFound:
-            # Создаём лист при первом обращении
             self.sheet.add_worksheet(title=title, rows=1000, cols=20)
             return self.sheet.worksheet(title)
 
@@ -150,7 +125,7 @@ class SheetDAL:
             self._comments = self._get_worksheet("Comments")
         return self._comments
 
-    # --- CRUD для моделей ---
+    # --- CRUD ---
     def get_models(self, status_filter=None):
         ws = self.models
         data = ws.get_all_records()
@@ -161,85 +136,76 @@ class SheetDAL:
     def create_model(self, article, name, season, category, created_by):
         ws = self.models
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Структура: id, article, name, season, category, status, created_at, updated_at, current_version
         row = [None, article, name, season, category, "draft", now, now, 1]
         ws.append_row(row)
-        # Получаем id (номер строки)
         return ws.row_count  # временный ID = номер строки
 
     def approve_tech_package(self, package_id):
         ws = self.tech_packages
-        # Найдём строку по id
         cell = ws.find(str(package_id), in_column=1)
-        if cell:
-            ws.update_cell(cell.row, 4, "approved")  # column 4 = status
-            # Обновим модель
-            model_id = int(ws.cell(cell.row, 2).value)  # column 2 = model_id
-            model_ws = self.models
-            model_cell = model_ws.find(str(model_id), in_column=1)
-            if model_cell:
-                model_ws.update_cell(model_cell.row, 6, "approved")  # status
-                model_ws.update_cell(model_cell.row, 8, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # updated_at
+        if not cell:
+            raise ValueError(f"Техпакет с id={package_id} не найден")
+        # Обновляем статус на approved
+        ws.update_cell(cell.row, 4, "approved")  # col 4 = status
+        # Обновляем модель
+        model_id = int(ws.cell(cell.row, 2).value)  # col 2 = model_id
+        model_ws = self.models
+        model_cell = model_ws.find(str(model_id), in_column=1)
+        if model_cell:
+            model_ws.update_cell(model_cell.row, 6, "approved")  # status
+            model_ws.update_cell(model_cell.row, 8, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))  # updated_at
 
     def create_new_version(self, model_id, created_by):
         ws = self.tech_packages
-        # Получим последнюю версию модели
         model_ws = self.models
         model_cell = model_ws.find(str(model_id), in_column=1)
         if not model_cell:
             raise ValueError("Модель не найдена")
-        current_ver = int(model_ws.cell(model_cell.row, 9).value)  # column 9 = current_version
+        current_ver = int(model_ws.cell(model_cell.row, 9).value)  # col 9 = current_version
         new_ver = current_ver + 1
-
-        # Создаём новую версию ТП
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [None, model_id, new_ver, "draft", now, created_by]
-        ws.append_row(row)
-
-        # Обновим модель
+        ws.append_row([None, model_id, new_ver, "draft", now, created_by])
+        # Обновляем модель
         model_ws.update_cell(model_cell.row, 9, new_ver)  # current_version
-        model_ws.update_cell(model_cell.row, 6, "draft")  # status
-        model_ws.update_cell(model_cell.row, 8, now)  # updated_at
-
+        model_ws.update_cell(model_cell.row, 6, "draft")
+        model_ws.update_cell(model_cell.row, 8, now)
         # Архивируем старые версии (>5)
         all_rows = ws.get_all_records()
-        versions_for_model = [r for r in all_rows if r.get("model_id") == str(model_id)]
-        if len(versions_for_model) > 5:
-            old_versions = sorted(versions_for_model, key=lambda x: int(x["version"]))[:len(versions_for_model)-5]
+        tps_for_model = [r for r in all_rows if str(r.get("model_id")) == str(model_id)]
+        if len(tps_for_model) > 5:
+            old_versions = sorted(tps_for_model, key=lambda x: int(x["version"]))[:len(tps_for_model)-5]
             for v in old_versions:
                 cell = ws.find(str(v["id"]), in_column=1)
                 if cell:
                     ws.update_cell(cell.row, 4, "archived")
 
-    # --- CRUD для файлов ---
     def save_file(self, package_id, filename, file_url, file_size, mime_type):
         ws = self.files
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [None, package_id, filename, file_url, file_size, mime_type, now, "active"]
-        ws.append_row(row)
+        ws.append_row([None, package_id, filename, file_url, file_size, mime_type, now, "active"])
 
     def get_package_files(self, package_id):
         ws = self.files
         data = ws.get_all_records()
-        return [r for r in data if r.get("tech_package_id") == str(package_id) and r.get("status") == "active"]
+        return [r for r in data if str(r.get("tech_package_id")) == str(package_id) and r.get("status") == "active"]
 
-    # --- CRUD для комментариев ---
     def add_comment(self, package_id, author, text):
         ws = self.comments
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        row = [None, package_id, author, text, now, "active"]
-        ws.append_row(row)
+        ws.append_row([None, package_id, author, text, now, "active"])
 
     def get_comments(self, package_id):
         ws = self.comments
         data = ws.get_all_records()
-        return [r for r in data if r.get("tech_package_id") == str(package_id) and r.get("status") == "active"]
+        return [r for r in data if str(r.get("tech_package_id")) == str(package_id) and r.get("status") == "active"]
 
-    # --- Удаление через архивирование (R-DE-7) ---
+    # --- Delete via archive (R-DE-7) ---
     def delete_model(self, model_id):
         ws = self.models
         cell = ws.find(str(model_id), in_column=1)
         if cell:
-            ws.update_cell(cell.row, 6, "archived")  # status
+            ws.update_cell(cell.row, 6, "archived")
 
     def delete_tech_package(self, package_id):
         ws = self.tech_packages
@@ -261,7 +227,7 @@ class SheetDAL:
 
 
 # ============================================================================
-# === 3. UI COMPONENTS =======================================================
+# === 3. UI HELPERS ==========================================================
 # ============================================================================
 
 def render_registry(entity_name, rows, actions_callback):
@@ -319,15 +285,15 @@ def page_design(dal):
             with col2:
                 if model.get('status') != 'approved':
                     if st.button("✅ Утвердить", key=f"approve_{model.get('id')}", use_container_width=True):
-                        # Найдём техпакет этой модели (последний active)
+                        # Найдём последний draft-ТП этой модели
                         tp_rows = dal.tech_packages.get_all_records()
                         tps = [r for r in tp_rows if r.get("model_id") == str(model.get('id')) and r.get("status") == "draft"]
                         if tps:
-                            dal.approve_tech_package(int(tps[0]["id"]))
+                            dal.approve_tech_package(int(tps[-1]["id"]))
                             st.success(f"Модель {model['article']} утверждена")
                             st.rerun()
                         else:
-                            st.warning("Нет активного технического пакета для утверждения")
+                            st.warning("Нет активного техпакета для утверждения")
             with col3:
                 if st.button("🗑️ Удалить", key=f"del_model_{model.get('id')}", use_container_width=True, type="secondary"):
                     dal.delete_model(int(model.get('id')))
@@ -341,13 +307,13 @@ def page_design(dal):
             st.markdown("---")
             st.subheader(f"📦 {model['article']} — {model['name']}")
 
-            # Получим техпакеты модели
+            # Получим последний техпакет модели
             tp_rows = dal.tech_packages.get_all_records()
             tps = [r for r in tp_rows if r.get("model_id") == str(model.get('id')) and r.get("status") != "archived"]
             if not tps:
                 st.warning("У модели нет технических пакетов")
                 return
-            package = tps[-1]  # последняя версия
+            package = tps[-1]
 
             col1, col2 = st.columns(2)
             with col1:
@@ -363,8 +329,8 @@ def page_design(dal):
                         if uploaded.size > 50 * 1024 * 1024:
                             st.error("Файл > 50 МБ")
                         else:
-                            # В реальном проекте: загрузка в Google Drive + получение shareable URL
-                            # Здесь — имитация: используем фиктивный URL
+                            # В реальном проекте: загрузка в Drive + получение shareable URL
+                            # Здесь — фиктивная ссылка для демонстрации
                             fake_url = f"https://drive.google.com/file/d/{package['id']}/view"
                             dal.save_file(
                                 int(package['id']),
@@ -380,14 +346,24 @@ def page_design(dal):
                 if files:
                     st.markdown("📎 **Файлы:**")
                     for f in files:
-                        col_f1, col_f2 = st.columns([3, 1])
+                        col_f1, col_f2, col_f3 = st.columns([2, 1, 1])
                         with col_f1:
                             st.caption(f"📄 [{f['filename']}]({f['file_url']})")
                         with col_f2:
-                            if st.button("🗑️", key=f"del_file_{f['id']}", help="Архивировать"):
+                            if st.button("🗑️", key=f"del_file_{f['id']}", help="Архивировать", use_container_width=True):
                                 dal.delete_file(int(f['id']))
-                                st.success("Файлрхивирован")
+                                st.success("Файл архивирован")
                                 st.rerun()
+                        with col_f3:
+                            with st.spinner("Загрузка..."):
+                                st.download_button(
+                                    label="⬇️",
+                                    data=b"",  # placeholder — в проде будет реальный файл
+                                    file_name=f['filename'],
+                                    mime=f['mime_type'],
+                                    key=f"dl_{f['id']}",
+                                    use_container_width=True
+                                )
 
             st.markdown("---")
             st.subheader("💬 Комментарии")
@@ -396,7 +372,7 @@ def page_design(dal):
                 with st.chat_message(name=c['author']):
                     st.markdown(c['text'])
                     st.caption(f"{c['author']} • {c['created_at']}")
-                    if st.button("🗑️", key=f"del_comm_{c['id']}", help="Архивировать"):
+                    if st.button("🗑️", key=f"del_comm_{c['id']}", help="Архивировать", use_container_width=True):
                         dal.delete_comment(int(c['id']))
                         st.success("Комментарий архивирован")
                         st.rerun()
@@ -521,7 +497,7 @@ def main():
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
-        st.caption("Версия: 0.9.0")
+        st.caption("Версия: 0.9.1")
 
     if page == "🏠 Главная":
         st.title("🏭 Система управления деятельностью предприятия")
@@ -534,7 +510,7 @@ def main():
         - ✅ Утверждение ТП, версионирование, комментарии
         - ✅ Удаление через `status='archived'`
         - ✅ Поддержка масштабирования шрифта до 150% (R-SY-5)
-        - ✅ Импорт из старых таблиц — реализован через `SheetDAL`
+        - ✅ Импорт из старых таблиц — через SheetDAL
         """)
     elif page == "📐 Конструирование":
         page_design(dal)
