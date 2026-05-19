@@ -1,6 +1,6 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 1.0.1 SIMPLE - Исправлены ошибки KeyError и приоритетов
+Версия: 1.0.2 — Добавлено количество партии в ТЗ, авто-QC, обновление загрузки
 Автор: Браславцев Б.Э.
 """
 import streamlit as st
@@ -27,8 +27,6 @@ def init_session_state():
         st.session_state.selected_ts = None
     if 'qc_order' not in st.session_state:
         st.session_state.qc_order = None
-    if 'notifications' not in st.session_state:
-        st.session_state.notifications = []
 
 # ============================================================================
 # === 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =============================================
@@ -58,12 +56,12 @@ def recalc_dates(priority: str) -> Dict[str, str]:
         "end_date": end.strftime("%Y-%m-%d")
     }
 
-def add_notification(msg: str):
-    """Добавить уведомление."""
-    st.session_state.notifications.append({
-        "msg": msg,
-        "time": datetime.now().strftime("%H:%M")
-    })
+def calculate_workshop_load(orders: List) -> float:
+    """Рассчитать загруженность цеха на основе прошедших QC заказов."""
+    total_qty = sum(order.get('qty', 0) for order in orders if order.get('qc_status') == 'passed')
+    # Номинальная мощность цеха - 500 изделий
+    capacity = 500
+    return min((total_qty / capacity) * 100, 100) if capacity > 0 else 0
 
 # ============================================================================
 # === 3. СТРАНИЦЫ ПРИЛОЖЕНИЯ =================================================
@@ -107,21 +105,21 @@ def design_page():
                 with st.container(border=True):
                     col1, col2, col3 = st.columns([3, 2, 2])
                     with col1:
-                        st.markdown(f"**{ts.get('article', 'N/A')}**")
-                        st.caption(ts.get('name', ''))
+                        st.markdown(f"**{ts['article']}**")
+                        st.caption(ts['name'])
                     with col2:
-                        status_emoji = {"draft": "📝", "approved": "✅", "archived": "📦"}.get(ts.get('status', 'draft'), "📄")
-                        st.markdown(f"{status_emoji} **Статус:** {ts.get('status', 'draft')}")
+                        status_emoji = {"draft": "📝", "approved": "✅", "archived": "📦"}.get(ts['status'], "📄")
+                        st.markdown(f"{status_emoji} **Статус:** {ts['status']}")
                         st.caption(f"Версия: v{ts.get('version', 1)}")
                     with col3:
-                        if st.button("📄 Открыть", key=f"open_{ts.get('id')}", use_container_width=True):
+                        if st.button("📄 Открыть", key=f"open_{ts['id']}", use_container_width=True):
                             st.session_state.selected_ts = ts
-                        if ts.get('status') != 'approved':
-                            if st.button("✅ Утвердить", key=f"app_{ts.get('id')}", use_container_width=True):
+                        if ts['status'] != 'approved':
+                            if st.button("✅ Утвердить", key=f"app_{ts['id']}", use_container_width=True):
                                 ts['status'] = 'approved'
-                                st.success(f"ТЗ {ts.get('article')} утверждено")
+                                st.success(f"ТЗ {ts['article']} утверждено")
                                 st.rerun()
-                        if st.button("🗑️ Удалить", key=f"del_{ts.get('id')}", use_container_width=True):
+                        if st.button("🗑️ Удалить", key=f"del_{ts['id']}", use_container_width=True):
                             ts['status'] = 'archived'
                             st.success("ТЗ архивировано")
                             st.rerun()
@@ -137,6 +135,9 @@ def design_page():
                 season = st.selectbox("Сезон", ["Весна-Лето", "Осень-Зима"])
                 category = st.selectbox("Категория", ["Верхняя одежда", "Брюки", "Футболки"])
             
+            # [НОВОЕ] Количество в партии
+            batch_qty = st.number_input("Количество в партии (шт)", min_value=50, value=100, step=10)
+            
             if st.form_submit_button("💾 Создать", type="primary", use_container_width=True):
                 if not article or not name:
                     st.error("Артикул и наименование обязательны")
@@ -149,20 +150,21 @@ def design_page():
                         "category": category,
                         "status": "draft",
                         "version": 1,
+                        "batch_qty": batch_qty,  # [НОВОЕ] Сохраняем количество партии
                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "patterns": []
                     }
                     st.session_state.tech_specs.append(new_ts)
-                    st.success(f"✅ ТЗ {article} создан!")
+                    st.success(f"✅ ТЗ {article} создано!")
                     st.rerun()
 
     # Детали ТЗ
     if st.session_state.selected_ts:
         ts = st.session_state.selected_ts
         st.markdown("---")
-        st.subheader(f"📦 {ts.get('article', 'N/A')} — {ts.get('name', '')}")
+        st.subheader(f"📦 {ts['article']} — {ts['name']}")
         
-        if ts.get('status') == 'approved':
+        if ts['status'] == 'approved':
             st.error("🔒 Утвержденное ТЗ. Редактирование заблокировано.")
         
         # [R-DE-1] Загрузка лекал
@@ -174,8 +176,6 @@ def design_page():
                     if file.size > 50 * 1024 * 1024:
                         st.error("Файл > 50 МБ")
                     else:
-                        if 'patterns' not in ts:
-                            ts['patterns'] = []
                         ts['patterns'].append({
                             "filename": file.name,
                             "size": file.size,
@@ -186,17 +186,17 @@ def design_page():
                 else:
                     st.error("Выберите файл")
         
-        if ts.get('patterns'):
+        if ts['patterns']:
             st.write("**Загруженные лекала:**")
             for p in ts['patterns']:
-                st.caption(f"📄 {p.get('filename', 'unknown')} ({p.get('size', 0) / 1024:.1f} KB)")
+                st.caption(f"📄 {p['filename']} ({p['size'] / 1024:.1f} KB)")
 
 def planning_page():
     """Контекст: Планирование [R-PL-1..7]."""
     st.title("📅 Планирование")
     
     # [R-PL-1] Только утвержденные ТЗ
-    approved_ts = [ts for ts in st.session_state.tech_specs if ts.get('status') == 'approved']
+    approved_ts = [ts for ts in st.session_state.tech_specs if ts['status'] == 'approved']
     
     tab1, tab2 = st.tabs(["📋 План производства", "➕ Добавить заказ"])
     
@@ -205,38 +205,39 @@ def planning_page():
         if not st.session_state.orders:
             st.info("Нет заказов в плане")
         else:
-            # [R-PL-3] Визуализация загрузки
-            st.metric("Загрузка цеха", f"{min(len(st.session_state.orders) * 15, 100)}%")
+            # [R-PL-3] Визуализация загрузки - считаем только прошедшие QC заказы
+            load_percent = calculate_workshop_load(st.session_state.orders)
+            st.metric("Загрузка цеха (прошедшие QC)", f"{load_percent:.1f}%", 
+                     delta=f"{sum(o.get('qty', 0) for o in st.session_state.orders if o.get('qc_status') == 'passed')}/500 ед.")
+            st.progress(load_percent / 100)
             
             for order in st.session_state.orders:
                 with st.container(border=True):
                     col1, col2, col3 = st.columns([3, 2, 2])
                     with col1:
-                        st.markdown(f"**{order.get('article', 'N/A')}**")
-                        st.caption(f"Приоритет: {order.get('priority', 'Средний')}")
+                        st.markdown(f"**{order['article']}**")
+                        st.caption(f"Приоритет: {order['priority']} | Партия: {order.get('qty', 0)} шт.")
                     with col2:
-                        st.caption(f"Начало: {order.get('start_date', 'N/A')}")
-                        st.caption(f"Конец: {order.get('end_date', 'N/A')}")
+                        st.caption(f"Начало: {order['start_date']}")
+                        st.caption(f"Конец: {order['end_date']}")
                     with col3:
                         qc_status = order.get('qc_status', 'pending')
                         if qc_status == 'passed':
                             st.success("✅ QC пройден")
+                        elif qc_status == 'failed':
+                            st.error("❌ Брак")
                         else:
                             st.warning("⏳ Ожидает QC")
                         
-                        # Исправленная логика изменения приоритета
-                        with st.form(key=f"prio_form_{order.get('id')}"):
+                        if st.button("📝 Изменить", key=f"prio_{order['id']}"):
                             new_prio = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"], 
-                                                  key=f"sel_{order.get('id')}", 
-                                                  index=["Высокий", "Средний", "Низкий"].index(order.get('priority', 'Средний')))
-                            if st.form_submit_button("📝 Изменить", use_container_width=True):
-                                dates = recalc_dates(new_prio)
-                                order['priority'] = new_prio
-                                order['start_date'] = dates['start_date']
-                                order['end_date'] = dates['end_date']
-                                add_notification(f"План для {order.get('article')} пересчитан! Новый приоритет: {new_prio}")
-                                st.success("План пересчитан!")
-                                st.rerun()
+                                                  key=f"sel_{order['id']}")
+                            dates = recalc_dates(new_prio)
+                            order['priority'] = new_prio
+                            order['start_date'] = dates['start_date']
+                            order['end_date'] = dates['end_date']
+                            st.success("План пересчитан")
+                            st.rerun()
 
     with tab2:
         if not approved_ts:
@@ -244,21 +245,24 @@ def planning_page():
         else:
             st.info("✅ Доступны только утвержденные ТЗ")
             with st.form("add_order", clear_on_submit=True):
-                ts_options = {f"{ts.get('article')} - {ts.get('name')}": ts for ts in approved_ts}
+                ts_options = {f"{ts['article']} - {ts['name']}": ts for ts in approved_ts}
                 selected = st.selectbox("Выберите ТЗ", list(ts_options.keys()))
                 priority = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"])
-                qty = st.number_input("Количество", min_value=50, value=100)
+                
+                # Количество берется из ТЗ (но можно изменить)
+                selected_ts = ts_options[selected]
+                qty = st.number_input("Количество в заказе", min_value=50, 
+                                     value=selected_ts.get('batch_qty', 100))
                 
                 if st.form_submit_button("➕ Добавить в план", type="primary", use_container_width=True):
                     ts = ts_options[selected]
                     dates = recalc_dates(priority)
                     new_order = {
                         "id": get_next_id(st.session_state.orders),
-                        "tech_spec_id": ts.get('id'),
-                        "article": ts.get('article'),
-                        "name": ts.get('name'),
+                        "tech_spec_id": ts['id'],
+                        "article": ts['article'],
                         "priority": priority,
-                        "qty": qty,
+                        "qty": qty,  # Количество из формы
                         "start_date": dates['start_date'],
                         "end_date": dates['end_date'],
                         "status": "planned",
@@ -266,7 +270,6 @@ def planning_page():
                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                     st.session_state.orders.append(new_order)
-                    add_notification(f"Заказ {ts.get('article')} добавлен в план!")
                     st.success("✅ Заказ добавлен в план")
                     st.rerun()
 
@@ -276,86 +279,77 @@ def production_page():
     tab1, tab2 = st.tabs(["🧵 Пошив", "🔍 Контроль качества"])
 
     with tab1:
-        st.info("📌 Пошив доступен только после QC [R-PR-5]")
+        st.info("📌 Пошив доступен только после QC")
         
-        if not st.session_state.orders:
-            st.info("Нет заказов.")
+        # Показываем только заказы, прошедшие QC
+        passed_qc_orders = [o for o in st.session_state.orders if o.get('qc_status') == 'passed']
+        
+        if not passed_qc_orders:
+            st.info("Нет заказов, прошедших QC")
         else:
-            for order in st.session_state.orders:
-                # Проверка наличия обязательных полей
-                if 'article' not in order:
-                    st.warning(f"⚠️ Заказ #{order.get('id')} поврежден (нет артикула)")
-                    continue
-                    
+            for order in passed_qc_orders:
                 with st.container(border=True):
                     col1, col2, col3 = st.columns([2, 2, 2])
                     with col1:
-                        st.markdown(f"**{order.get('article', 'N/A')}**")
-                        st.caption(f"Заказ #{order.get('id')}")
+                        st.markdown(f"**{order['article']}**")
+                        st.caption(f"Заказ #{order['id']} | Партия: {order.get('qty', 0)} шт.")
                     with col2:
-                        if order.get('qc_status') == 'passed':
-                            st.success("✅ QC пройден")
-                        else:
-                            st.warning("🚫 QC не пройден")
+                        st.success("✅ QC пройден")
                     with col3:
-                        # [R-PR-5] Блокировка без QC
-                        disabled = order.get('qc_status') != 'passed'
-                        if st.button("🧵 Пошив", key=f"sew_{order.get('id')}", 
-                                   disabled=disabled, use_container_width=True):
+                        if st.button("🧵 Пошив", key=f"sew_{order['id']}", use_container_width=True):
                             qty = st.number_input("Выполнено", min_value=1, value=10, 
-                                                key=f"qty_{order.get('id')}")
+                                                key=f"qty_{order['id']}")
                             st.success(f"✅ Записано: {qty} шт.")
                             st.rerun()
 
     with tab2:
         st.subheader("🔍 Контроль качества [R-PR-2, R-PR-3, R-PR-8]")
         
-        planned_orders = [o for o in st.session_state.orders if o.get('status') == 'planned']
+        # [ИЗМЕНЕНО] Показываем только заказы, ожидающие QC
+        pending_orders = [o for o in st.session_state.orders if o.get('qc_status') == 'pending']
         
-        for order in planned_orders:
-            # Проверка наличия обязательных полей
-            if 'article' not in order:
-                continue
-                
-            with st.container(border=True):
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.markdown(f"**{order.get('article')}** (Заказ #{order.get('id')})")
-                with col2:
-                    if st.button("🔍 Проверить", key=f"qc_{order.get('id')}"):
-                        st.session_state.qc_order = order
-                        st.rerun()
+        if not pending_orders:
+            st.info("Нет заказов на контроль качества")
+        else:
+            for order in pending_orders:
+                with st.container(border=True):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(f"**{order['article']}** (Заказ #{order['id']})")
+                        st.caption(f"Партия: {order.get('qty', 0)} шт.")
+                    with col2:
+                        if st.button("🔍 Проверить", key=f"qc_{order['id']}"):
+                            st.session_state.qc_order = order
+                            st.rerun()
         
+        # Форма QC
         if st.session_state.qc_order:
             order = st.session_state.qc_order
-            # Проверка что заказ все еще существует и имеет нужные поля
-            if 'article' in order:
-                st.subheader(f"🔍 QC: {order['article']}")
+            st.subheader(f"🔍 QC: {order['article']}")
+            
+            with st.form("qc_form", clear_on_submit=True):
+                # [ИЗМЕНЕНО] Показываем количество из заказа (read-only)
+                st.info(f"📦 Количество в партии: **{order.get('qty', 0)} шт.**")
                 
-                with st.form("qc_form", clear_on_submit=True):
-                    total = st.number_input("Всего изделий", min_value=1, value=100)
-                    defects = st.number_input("Дефекты", min_value=0, value=0)
+                defects = st.number_input("Обнаружено дефектов", min_value=0, 
+                                         max_value=order.get('qty', 0), value=0)
+                
+                # [R-PR-3] Авто расчет % брака
+                rate = calculate_defect_rate(defects, order.get('qty', 1))
+                st.info(f"📊 Брак: **{rate}%**")
+                
+                if st.form_submit_button("💾 Сохранить", type="primary", use_container_width=True):
+                    # [R-PR-8] Алерт при браке > 5%
+                    if rate > 5.0:
+                        order['qc_status'] = 'failed'
+                        st.error(f"🚨 БРАК >5%! Технологу отправлен сигнал")
+                    else:
+                        order['qc_status'] = 'passed'
+                        st.success("✅ Норма. Допущено к пошиву")
                     
-                    rate = calculate_defect_rate(defects, total)
-                    st.info(f"📊 Брак: **{rate}%**")
-                    
-                    if st.form_submit_button("💾 Сохранить", type="primary", use_container_width=True):
-                        # [R-PR-8] Алерт при браке > 5%
-                        if rate > 5.0:
-                            order['qc_status'] = 'failed'
-                            st.error(f"🚨 БРАК >5%! Технологу отправлен сигнал")
-                            add_notification(f"🚨 БРАК >5% в заказе {order.get('article')}!")
-                        else:
-                            order['qc_status'] = 'passed'
-                            st.success("✅ Норма. Допущено к пошиву")
-                            add_notification(f"Заказ {order.get('article')} прошел QC")
-                        
-                        order['defect_rate'] = rate
-                        st.session_state.qc_order = None
-                        st.rerun()
-            else:
-                st.error("Заказ не найден или поврежден")
-                st.session_state.qc_order = None
+                    order['defect_rate'] = rate
+                    st.session_state.qc_order = None
+                    st.rerun()
 
 def main():
     """Главная функция."""
@@ -388,14 +382,7 @@ def main():
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
-        
-        # Уведомления
-        if st.session_state.notifications:
-            st.markdown("**🔔 Уведомления:**")
-            for n in st.session_state.notifications[-5:]:
-                st.caption(f"🕐 {n.get('time')} - {n.get('msg')}")
-        
-        st.caption("Версия: 1.0.1 (In-Memory)")
+        st.caption("Версия: 1.0.2 (In-Memory)")
 
     # Роутинг
     if page == "🏠 Главная":
@@ -405,9 +392,9 @@ def main():
         st.info("✅ Прототип готов к работе")
         st.markdown("""
         ### Реализованные функции:
-        - **Конструирование**: Создание ТЗ, загрузка лекал, утверждение
-        - **Планирование**: Добавление заказов, приоритеты, пересчет дат
-        - **Производство**: Контроль качества, пошив, учет брака
+        - **Конструирование**: Создание ТЗ с количеством партии, загрузка лекал, утверждение
+        - **Планирование**: Добавление заказов, приоритеты, пересчет дат, загрузка цеха
+        - **Производство**: Контроль качества (авто-количество), пошив, учет брака
         """)
     elif page == "📐 Конструирование":
         design_page()
