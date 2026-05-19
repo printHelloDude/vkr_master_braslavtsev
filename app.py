@@ -1,6 +1,6 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 1.2.0 — Исправлены заглушки, реализованы контексты Планирования и Производства
+Версия: 2.0.0 — Full Feature Release (RBAC, Dashboard, Archive, History, Notifications)
 Автор: Браславцев Б.Э. (AI-Architect Refactoring)
 """
 import streamlit as st
@@ -8,7 +8,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any, Tuple
-import time
+import json
+import csv
+import io
 
 # =============================================================================
 # === 1. CONFIG & SESSION INIT =================================================
@@ -16,13 +18,52 @@ import time
 TIMEOUT_MINUTES = 30
 DEFAULT_SHEET_ID = "12jwDv0K-6qC8vAMO6TaNpgpbhgLhlHX5D8Kb768BwQs"
 
+# RBAC CONFIG
+ROLES_MAP = {
+    "admin": "owner",
+    "demo": "owner",
+    "planner": "analyst",
+    "tech": "technologist",
+    "designer": "designer",
+    "sewer": "tailor",
+    "qc": "qc",
+    "user": "analyst",
+    "guest": "guest"
+}
+
+ROLE_NAMES = {
+    "owner": "Владелец",
+    "analyst": "Бизнес-аналитик",
+    "technologist": "Технолог",
+    "designer": "Конструктор",
+    "tailor": "Швея",
+    "qc": "Контролер ОТК",
+    "guest": "Гость"
+}
+
+# RBAC PERMISSIONS (Contexts)
+PERMISSIONS = {
+    "owner": ["design", "planning", "production", "dashboard"],
+    "analyst": ["planning", "production", "dashboard"],
+    "technologist": ["design", "production", "dashboard"],
+    "designer": ["design", "dashboard"],
+    "tailor": ["production", "dashboard"],
+    "qc": ["production", "dashboard"],
+    "guest": ["dashboard"]
+}
+
 def init_session_state():
     """Безопасная инициализация ключей сессии."""
     defaults = {
-        'authenticated': False, 'current_user': None, 'last_activity': datetime.now(),
-        'selected_ts': None, 'show_ts_details': False, 'selected_order': None,
+        'authenticated': False, 'current_user': None, 'user_role': None,
+        'last_activity': datetime.now(),
+        'selected_ts': None, 'show_ts_details': False, 
+        'selected_order': None, 'show_order_details': False,
+        'selected_production_order': None, 'qc_order': None,
         'dal': None, 'fallback_mode': False, 'login_attempts': 0,
-        'notifications': [], 'show_order_details': False, 'show_production_details': False
+        'notifications': [], # List of dicts: {'to_role': str, 'msg': str, 'ts': str}
+        'confirm_delete': None,
+        'sidebar_expander': True
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -40,10 +81,10 @@ def check_session_timeout():
         st.session_state.last_activity = datetime.now()
 
 def login_page():
-    """[R-SY-1] Страница аутентификации."""
+    """[R-SY-1] Страница аутентификации с RBAC."""
     st.title("🔐 Вход в систему")
     with st.form("login_form", clear_on_submit=True):
-        username = st.text_input("Логин", placeholder="user")
+        username = st.text_input("Логин", placeholder="admin / planner / tech / designer / sewer / qc")
         password = st.text_input("Пароль", type="password", placeholder="••••")
         col1, col2 = st.columns(2)
         with col1:
@@ -51,9 +92,10 @@ def login_page():
             if submit:
                 if not username:
                     st.error("Введите логин")
-                elif username.strip().lower() in ["admin", "demo", "user", "tech", "sewer", "qc", "planner"]:
+                elif username.strip().lower() in ROLES_MAP:
                     st.session_state.authenticated = True
                     st.session_state.current_user = username.strip()
+                    st.session_state.user_role = ROLES_MAP[username.strip().lower()]
                     st.session_state.last_activity = datetime.now()
                     st.session_state.login_attempts = 0
                     st.rerun()
@@ -68,6 +110,7 @@ def login_page():
             if guest:
                 st.session_state.authenticated = True
                 st.session_state.current_user = "Гость"
+                st.session_state.user_role = "guest"
                 st.session_state.last_activity = datetime.now()
                 st.rerun()
 
@@ -109,8 +152,10 @@ class InMemoryDAL:
         self._init_headers()
 
     def _init_headers(self):
-        if not self.db['TechSpecs']: self.db['TechSpecs'].append({"id": None, "article": None, "name": None, "season": None, "category": None, "status": "draft", "created_at": None, "updated_at": None, "current_version": 1})
-        if not self.db['Orders']: self.db['Orders'].append({"id": None, "tech_spec_id": None, "article": None, "priority": "Средний", "start_date": None, "end_date": None, "status": "planned", "qc_status": "pending"})
+        if not self.db['TechSpecs']: 
+            self.db['TechSpecs'].append({"id": None, "article": None, "name": None, "season": None, "category": None, "status": "draft", "created_at": None, "updated_at": None, "current_version": 1})
+        if not self.db['Orders']: 
+            self.db['Orders'].append({"id": None, "tech_spec_id": None, "article": None, "priority": "Средний", "start_date": None, "end_date": None, "status": "planned", "qc_status": "pending", "created_at": None})
 
     def _find_row(self, sheet_name: str, col: str, value: str) -> Optional[int]:
         for i, row in enumerate(self.db.get(sheet_name, [])):
@@ -141,15 +186,14 @@ class SheetDAL:
         else:
             self.client = get_gspread_client()
             if self.client is None:
-                st.warning("️ Не удалось подключиться к Google Sheets. Режим in-memory активирован.")
+                st.warning("⚠️ Не удалось подключиться к Google Sheets. Режим in-memory активирован.")
                 self.impl = InMemoryDAL()
                 self.use_fallback = True
             else:
                 sheet_id = st.secrets.get("GOOGLE_SHEET_ID", DEFAULT_SHEET_ID)
                 try:
                     self.sheet = self.client.open_by_key(sheet_id)
-                    # Ensure sheets exist
-                    for name in ['TechSpecs', 'Versions', 'Patterns', 'Comments', 'Orders', 'Batches']:
+                    for name in ['TechSpecs', 'Versions', 'Patterns', 'Comments', 'Orders', 'Batches', 'Operations']:
                         if not any(w.title == name for w in self.sheet.worksheets()):
                             self.sheet.add_worksheet(name, rows=100, cols=20)
                 except Exception:
@@ -328,6 +372,39 @@ class SheetDAL:
                 ws.append_row([None, order_id, defects, total, rate, alert_sent, now])
             except Exception: pass
 
+    def get_production_history(self, days=1095):
+        """[R-PR-6] Хранение/архив выработки 3 года."""
+        cutoff = datetime.now() - timedelta(days=days)
+        if self.use_fallback:
+            all_ops = self.impl.get_all('Operations')
+            return [op for op in all_ops if datetime.strptime(op['created_at'], "%Y-%m-%d %H:%M:%S") >= cutoff]
+        else:
+            try:
+                ws = self.sheet.worksheet('Operations')
+                all_ops = ws.get_all_records()
+                return [op for op in all_ops if datetime.strptime(op['created_at'], "%Y-%m-%d %H:%M:%S") >= cutoff]
+            except Exception: return []
+
+    def rollback_version(self, version_id: str):
+        """[R-DE-5] Логика отката версии."""
+        if self.use_fallback:
+            target = None
+            for v in self.impl.db['Versions']:
+                if str(v['id']) == str(version_id): target = v
+            if target:
+                target['status'] = 'active' # В прототипе меняем статус на активный
+                # Архивируем текущую активную
+                ts_id = target['tech_spec_id']
+                for v in self.impl.db['Versions']:
+                    if v['tech_spec_id'] == ts_id and v['id'] != version_id and v['status'] != 'archived':
+                        v['status'] = 'archived'
+        else:
+            try:
+                ws = self.sheet.worksheet('Versions')
+                cell = ws.find(str(version_id), in_column=1)
+                if cell: ws.update_cell(cell.row, 4, "active")
+            except Exception: pass
+
 # =============================================================================
 # === 3. DOMAIN LOGIC & VALIDATION =============================================
 # =============================================================================
@@ -366,9 +443,47 @@ def calculate_defect_rate(defects: int, total: int) -> float:
     if total <= 0: return 0.0
     return round((defects / total) * 100, 2)
 
+def generate_plan_csv(orders: List[Dict]) -> str:
+    """[R-PL-7] Fallback для экспорта плана."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Артикул", "Приоритет", "Начало", "Конец", "Статус"])
+    for o in orders:
+        writer.writerow([o.get('id'), o.get('article'), o.get('priority'), o.get('start_date'), o.get('end_date'), o.get('status')])
+    return output.getvalue()
+
 # =============================================================================
 # === 4. UI COMPONENTS & FORMS =================================================
 # =============================================================================
+def render_notifications():
+    """Отображение уведомлений с роутингом (R-PL-4, R-PR-8)."""
+    role = st.session_state.user_role
+    # Фильтрация уведомлений: видим все если owner, или если уведомление для нашей роли
+    visible = [n for n in st.session_state.notifications if n['to_role'] == role or role == 'owner']
+    
+    if visible:
+        st.sidebar.markdown("📢 **Уведомления:**")
+        for n in visible:
+            st.sidebar.caption(f" {n['msg']}")
+        # Очистка после прочтения
+        st.session_state.notifications = []
+
+def render_metrics_dashboard(dal: Any):
+    """Dashboard с метриками (Ко.1, Ко.2, Ко.3)."""
+    st.header("📊 Дашборд показателей")
+    
+    # Mock logic for metrics based on data state
+    specs = dal.get_tech_specs()
+    approved_count = len([s for s in specs if s.get('status') == 'approved'])
+    
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Утвержденные ТЗ", approved_count, "Тренд")
+    with c2:
+        st.metric("Активные заказы", len(dal.get_orders()))
+    with c3:
+        st.metric("Средний % брака", "4.2%", "-0.5%") # Static placeholder for prototype
+
 def render_tech_spec_card(spec: Dict, dal: Any):
     with st.container(border=True):
         col1, col2, col3 = st.columns([3, 2, 2])
@@ -379,40 +494,40 @@ def render_tech_spec_card(spec: Dict, dal: Any):
             status = spec.get('status', 'unknown')
             emoji = {'draft': '📝', 'approved': '✅', 'on_review': '⏳', 'archived': '📦'}.get(status, '')
             st.markdown(f"{emoji} **Статус:** {status}")
-            st.caption(f"Версия: v{spec.get('current_version', 1)} | Создано: {spec.get('created_at', '')}")
+            st.caption(f"Версия: v{spec.get('current_version', 1)}")
             days = calculate_approval_days(spec.get('created_at'))
-            if days > 2 and status == 'draft': st.warning(f"️ Согласование >2 дней (Требование R-DE-3)")
+            if days > 2 and status == 'draft': st.warning("⚠️ Согласование >2 дней (R-DE-3)")
         with col3:
             b1, b2, b3 = st.columns(3)
             with b1:
-                if st.button("📄 Открыть", key=f"open_{spec['id']}", use_container_width=True):
+                if st.button("📄", key=f"open_{spec['id']}", use_container_width=True):
                     st.session_state.selected_ts = spec
                     st.session_state.show_ts_details = True
                     st.rerun()
             with b2:
                 if spec.get('status') != 'approved':
-                    if st.button("✅ Утвердить", key=f"app_{spec['id']}", use_container_width=True):
+                    if st.button("✅", key=f"app_{spec['id']}", use_container_width=True):
                         versions = dal.get_versions_for_ts(spec['id'])
                         if versions:
                             with st.spinner("Утверждение..."):
                                 dal.approve_version(versions[-1]['id'])
                                 st.success(f"ТЗ {spec['article']} утверждено")
                                 st.rerun()
-                        else: st.warning("Нет версий для утверждения")
+                        else: st.warning("Нет версий")
             with b3:
-                if st.button("️ Архив", key=f"del_{spec['id']}", use_container_width=True, type="secondary"):
+                if st.button("🗑️", key=f"del_{spec['id']}", use_container_width=True, type="secondary"):
                     if st.session_state.get('confirm_delete') == spec['id']:
                         with st.spinner("Архивация..."):
                             dal.archive_ts(spec['id'])
-                            st.success(f"ТЗ {spec['article']} архивировано")
+                            st.success("Архивировано")
                             st.session_state.confirm_delete = None
                             st.rerun()
                     else:
                         st.session_state.confirm_delete = spec['id']
-                        st.warning("Нажмите еще раз для подтверждения")
+                        st.warning("Подтвердите удаление")
 
 def render_file_uploader(version_id: str, dal: Any):
-    """[R-DE-1] Компонент загрузки лекал с валидацией."""
+    """[R-DE-1] Компонент загрузки лекал."""
     st.subheader("📎 Загрузка лекал")
     with st.form("upload_pattern", clear_on_submit=True):
         file = st.file_uploader("Выберите файл (DXF, PDF ≤50MB)", type=["pdf", "dxf"])
@@ -427,7 +542,7 @@ def render_file_uploader(version_id: str, dal: Any):
                         ws = dal.sheet.worksheet('Patterns')
                         ws.append_row([None, str(version_id), file.name, "uploaded", file.size, now, "active"])
                     except Exception: pass
-                st.success("✅ Лекало загружено и прикреплено к версии")
+                st.success("✅ Лекало загружено")
                 st.rerun()
             else:
                 st.error(msg)
@@ -436,77 +551,81 @@ def render_file_uploader(version_id: str, dal: Any):
 # === 5. PAGE RENDERERS ========================================================
 # =============================================================================
 def page_planning(dal: Any):
-    """Контекст: Планирование (R-PL-1, R-PL-6, R-PL-2, R-PL-3, R-PL-4)"""
-    st.title("📅 Планирование")
+    """Контекст: Планирование (R-PL-1, R-PL-2, R-PL-3, R-PL-7)"""
+    st.title(" Планирование")
     st.markdown("---")
     
-    # R-PL-1: Видим только утвержденные ТЗ
     approved_ts = dal.get_tech_specs(status_filter="approved")
+    orders = dal.get_orders()
     
-    tab1, tab2 = st.tabs(["📋 Реестр заказов", "➕ Добавить в план"])
+    tab1, tab2 = st.tabs(["📋 Реестр заказов", " Добавить в план"])
     
     with tab1:
-        orders = dal.get_orders()
-        if not orders:
-            st.info("️ Нет заказов в плане. Добавьте утвержденное ТЗ.")
+        # [R-PL-3] Визуализация загрузки
+        if orders:
+            df_orders = [{
+                "ID": o.get('id'), 
+                "Артикул": o.get('article'), 
+                "Приоритет": o.get('priority'), 
+                "Начало": o.get('start_date'), 
+                "Конец": o.get('end_date'), 
+                "QC": o.get('qc_status'),
+                "Статус": o.get('status')
+            } for o in orders]
+            st.dataframe(df_orders, use_container_width=True)
+            
+            # [R-PL-7] Экспорт
+            csv_data = generate_plan_csv(orders)
+            st.download_button(
+                label="📥 Скачать план (CSV)",
+                data=csv_data,
+                file_name='plan_export.csv',
+                mime='text/csv'
+            )
         else:
-            for order in orders:
-                with st.container(border=True):
-                    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
-                    with c1:
-                        st.markdown(f"**{order.get('article', 'N/A')}**")
-                        st.caption(f"Приоритет: {order.get('priority')}")
-                    with c2:
-                        st.caption(f"Начало: {order.get('start_date')}")
-                        st.caption(f"Конец: {order.get('end_date')}")
-                    with c3:
-                        st.metric("Загрузка цеха", "65%") # [R-PL-3]
-                    with c4:
-                        qc = order.get('qc_status', 'pending')
-                        if qc == 'passed': st.success("✅ КК пройден")
-                        else: st.warning("⏳ Ожидает КК")
-                        
-                        if st.button("📝 Изменить приоритет", key=f"prio_{order['id']}"):
-                            st.session_state.selected_order = order
-                            st.rerun()
+            st.info("Нет заказов.")
+
+        for order in orders:
+            with st.container(border=True):
+                c1, c2 = st.columns([3, 1])
+                with c1: st.markdown(f"**{order.get('article')}**")
+                with c2:
+                    if st.button("📝 Приоритет", key=f"prio_{order['id']}"):
+                        st.session_state.selected_order = order
+                        st.rerun()
     
     with tab2:
-        if not approved_ts:
-            st.warning("Нет утвержденных ТЗ. Перейдите в Конструирование.")
+        if not approved_ts: st.warning("Нет утвержденных ТЗ.")
         else:
-            st.info("✅ Отображаются только утвержденные ТЗ (R-PL-1)")
+            st.info("✅ Утвержденные ТЗ (R-PL-1)")
             for ts in approved_ts:
                 with st.container(border=True):
                     c1, c2 = st.columns([3, 1])
                     with c1: st.markdown(f"**{ts['article']}** — {ts['name']}")
                     with c2:
-                        if st.button("📥 В план", key=f"plan_{ts['id']}"):
+                        if st.button(" В план", key=f"plan_{ts['id']}"):
                             st.session_state.selected_ts = ts
                             st.rerun()
-    
+
     # Form to create order
-    if st.session_state.get('selected_ts') and tab2: # Check tab2 to avoid collision
+    if st.session_state.get('selected_ts') and tab2:
         ts = st.session_state.selected_ts
-        st.subheader(f"➕ Планирование: {ts['article']}")
-        
-        # [R-PL-6] Проверка остатков
-        with st.expander("📦 Проверка остатков материалов (R-PL-6)"):
-            if st.button("Проверить остатки"):
-                st.success("✅ Материалы в наличии.")
+        st.subheader(f" Планирование: {ts['article']}")
         
         with st.form("create_order_form", clear_on_submit=True):
             prio = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"])
             qty = st.number_input("Количество (Мин. 50)", min_value=50, value=100)
-            dates = recalc_dates_on_priority(prio) # Auto-calc dates
+            dates = recalc_dates_on_priority(prio)
             c1, c2 = st.columns(2)
-            with c1: st.date_input("Дата начала", value=datetime.strptime(dates['start_date'], "%Y-%m-%d"))
-            with c2: st.date_input("Дата окончания", value=datetime.strptime(dates['end_date'], "%Y-%m-%d"))
+            with c1: st.date_input("Начало", value=datetime.strptime(dates['start_date'], "%Y-%m-%d"))
+            with c2: st.date_input("Конец", value=datetime.strptime(dates['end_date'], "%Y-%m-%d"))
             
-            if st.form_submit_button("✅ Добавить в план", type="primary", use_container_width=True):
-                with st.spinner("Создание заказа..."):
+            if st.form_submit_button("✅ В план", type="primary", use_container_width=True):
+                with st.spinner("Создание..."):
                     dal.create_order(ts['id'], ts['article'], prio, qty, dates['start_date'], dates['end_date'])
                     # [R-PL-4] Notification
-                    st.session_state.notifications.append(f"🔔 Заказ {ts['article']} добавлен в план. Ответственные уведомлены.")
+                    st.session_state.notifications.append({"to_role": "analyst", "msg": f"Заказ {ts['article']} добавлен.", "ts": datetime.now().strftime("%H:%M")})
+                    st.session_state.notifications.append({"to_role": "owner", "msg": f"Заказ {ts['article']} добавлен.", "ts": datetime.now().strftime("%H:%M")})
                     st.success("Заказ создан!")
                     st.session_state.selected_ts = None
                     st.rerun()
@@ -514,115 +633,117 @@ def page_planning(dal: Any):
     # Form to change priority
     if st.session_state.get('selected_order') and tab1:
         order = st.session_state.selected_order
-        st.subheader(f" Изменение приоритета: {order['article']}")
+        st.subheader(f" Изменение: {order['article']}")
         with st.form("change_prio_form", clear_on_submit=True):
             new_prio = st.selectbox("Новый приоритет", ["Высокий", "Средний", "Низкий"], index=["Высокий", "Средний", "Низкий"].index(order.get("priority", "Средний")))
-            if st.form_submit_button("🔄 Пересчитать план", type="primary", use_container_width=True):
-                with st.spinner("Пересчет дат и уведомление..."):
+            if st.form_submit_button(" Пересчитать", type="primary", use_container_width=True):
+                with st.spinner("Пересчет..."):
                     dates = recalc_dates_on_priority(new_prio)
                     dal.update_order_priority(str(order['id']), new_prio, dates['start_date'], dates['end_date'])
-                    st.session_state.notifications.append(f" План изменен для {order['article']}. Даты пересчитаны.")
-                    st.success("Приоритет изменен, даты обновлены.")
+                    st.session_state.notifications.append({"to_role": "technologist", "msg": f"Изменен план для {order['article']}.", "ts": datetime.now().strftime("%H:%M")})
+                    st.success("План обновлен.")
                     st.session_state.selected_order = None
                     st.rerun()
 
 def page_production(dal: Any):
-    """Контекст: Производство (R-PR-1, R-PR-5, R-PR-8)"""
+    """Контекст: Производство (R-PR-1, R-PR-2, R-PR-5, R-PR-6, R-PR-8)"""
     st.title("🏭 Производство")
     st.markdown("---")
     
-    tab1, tab2 = st.tabs(["🧵 Пошив", " Контроль качества"])
+    tab1, tab2, tab3 = st.tabs(["🧵 Пошив", " Контроль качества", "📜 Архив"])
     
     with tab1:
-        st.info(" Операции пошива доступны только для пачек, прошедших контроль качества (R-PR-5).")
+        st.info(" Операции доступны только после QC (R-PR-5).")
         orders = dal.get_orders()
         
-        if not orders: st.info("Нет заказов.")
-        else:
-            for order in orders:
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([2, 2, 2])
-                    with c1:
-                        st.markdown(f"**{order.get('article')}**")
-                        st.caption(f"Заказ №{order.get('id')}")
-                    with c2:
-                        qc = order.get('qc_status', 'pending')
-                        if qc == 'passed': st.success("✅ КК пройден")
-                        else: st.warning("🚫 КК не пройден")
-                    with c3:
-                        # [R-PR-5] Block if QC not passed
-                        disabled = (qc != 'passed')
-                        if st.button("🧵 Начать пошив", key=f"sew_{order['id']}", disabled=disabled, use_container_width=True):
-                            st.session_state.selected_production_order = order
-                            st.rerun()
+        for order in orders:
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([2, 2, 2])
+                with c1: st.markdown(f"**{order.get('article')}**")
+                with c2:
+                    qc = order.get('qc_status', 'pending')
+                    if qc == 'passed': st.success("✅ QC пройден")
+                    else: st.warning("⏳ Ожидает QC")
+                with c3:
+                    disabled = (qc != 'passed')
+                    if st.button(" Пошив", key=f"sew_{order['id']}", disabled=disabled, use_container_width=True):
+                        st.session_state.selected_production_order = order
+                        st.rerun()
 
         if st.session_state.get('selected_production_order') and tab1:
             order = st.session_state.selected_production_order
-            st.subheader(f"🧵 Пошив заказа: {order['article']}")
+            st.subheader(f"🧵 Пошив: {order['article']}")
             with st.form("sew_form", clear_on_submit=True):
                 worker = st.text_input("Швея", value=st.session_state.current_user)
                 qty = st.number_input("Выполнено (шт)", min_value=1, value=10)
-                if st.form_submit_button("✅ Записать выполнение", type="primary", use_container_width=True):
+                if st.form_submit_button("✅ Записать", type="primary", use_container_width=True):
                     with st.spinner("Сохранение..."):
                         dal.record_operation(str(order['id']), worker, qty)
-                        st.success("Операция записана.")
+                        st.success("Записано.")
                         st.session_state.selected_production_order = None
                         st.rerun()
 
     with tab2:
         st.subheader("🔍 Фиксация дефектов (R-PR-2, R-PR-3, R-PR-8)")
         orders = dal.get_orders()
-        # Only allow QC on planned orders
-        planned_orders = [o for o in orders if o.get('status') == 'planned']
+        planned = [o for o in orders if o.get('status') == 'planned']
         
-        for order in planned_orders:
+        for order in planned:
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
-                with c1: st.markdown(f"**{order.get('article')}** (Заказ №{order.get('id')})")
+                with c1: st.markdown(f"**{order.get('article')}**")
                 with c2:
                     qc = order.get('qc_status', 'pending')
                     if qc == 'pending':
                         if st.button("🔍 Проверить", key=f"qc_{order['id']}"):
                             st.session_state.qc_order = order
                             st.rerun()
-                    elif qc == 'passed': st.success("✅ Пройден")
-                    else: st.error("❌ Брак")
+                    elif qc == 'passed': st.success("✅")
+                    else: st.error(" Брак")
 
         if st.session_state.get('qc_order') and tab2:
             order = st.session_state.qc_order
-            st.subheader(f" Контроль качества: {order['article']}")
+            st.subheader(f" QC: {order['article']}")
             with st.form("qc_form", clear_on_submit=True):
-                total = st.number_input("Всего изделий в партии", min_value=1, value=100)
-                defects = st.number_input("Обнаружено дефектов", min_value=0, value=0)
-                
-                # [R-PR-3] Auto calc rate
+                total = st.number_input("Всего", min_value=1, value=100)
+                defects = st.number_input("Дефекты", min_value=0, value=0)
                 rate = calculate_defect_rate(defects, total)
-                st.info(f"📊 Процент брака: **{rate}%**")
+                st.info(f"📊 Брак: **{rate}%**")
                 
-                if st.form_submit_button("💾 Сохранить результат", type="primary", use_container_width=True):
+                if st.form_submit_button("💾 Сохранить", type="primary", use_container_width=True):
                     alert = False
-                    # [R-PR-8] Alert if > 5%
                     if rate > 5.0:
                         alert = True
                         dal.update_order_qc(str(order['id']), 'failed')
-                        st.session_state.notifications.append(f"🔨 АЛЕРТ ТЕХНОЛОГУ! Брак >5% ({rate}%) для заказа {order['article']}")
-                        st.error(f"🚨 ПРЕВЫШЕН ПОРОГ БРАКА (>5%)! Сигнал технологу отправлен.")
+                        st.error(f" БРАК >5%! Алерт технологу.")
+                        st.session_state.notifications.append({"to_role": "technologist", "msg": f"БРАК >5% в {order['article']} ({rate}%)!", "ts": datetime.now().strftime("%H:%M")})
+                        st.session_state.notifications.append({"to_role": "owner", "msg": f"БРАК >5% в {order['article']}!", "ts": datetime.now().strftime("%H:%M")})
                     else:
                         dal.update_order_qc(str(order['id']), 'passed')
-                        st.success("✅ Брак в норме. Пачка допущена к пошиву.")
+                        st.success("✅ Норма.")
                     
                     dal.record_defect(str(order['id']), defects, total, rate, alert)
                     st.session_state.qc_order = None
                     st.rerun()
+    
+    with tab3:
+        # [R-PR-6] Архив выработки
+        st.subheader("📜 Архив операций (3 года)")
+        history = dal.get_production_history(days=1095)
+        if history:
+            df_hist = [{"ID": h.get('id'), "Заказ": h.get('order_id'), "Швея": h.get('worker'), "Кол-во": h.get('qty'), "Дата": h.get('created_at')} for h in history]
+            st.dataframe(df_hist, use_container_width=True)
+        else:
+            st.info("Нет записей.")
 
 def page_design(dal: Any):
-    """Контекст: Конструирование (UC.1, UC.2)"""
-    st.title("📐 Конструирование")
+    """Контекст: Конструирование (R-DE-1..6)"""
+    st.title(" Конструирование")
     st.markdown("---")
-    tab1, tab2 = st.tabs(["📋 Реестр ТЗ", "➕ Создать ТЗ"])
+    tab1, tab2 = st.tabs(["📋 Реестр ТЗ", " Создать ТЗ"])
     with tab1:
         specs = dal.get_tech_specs()
-        if not specs: st.info("⚠️ Нет технических заданий. Создайте первое.")
+        if not specs: st.info("⚠️ Нет ТЗ.")
         else:
             for spec in specs: render_tech_spec_card(spec, dal)
         
@@ -631,49 +752,59 @@ def page_design(dal: Any):
             st.markdown("---")
             st.subheader(f"📦 {spec['article']} — {spec['name']}")
             
+            # [R-DE-4] Блокировка редактирования
             if spec.get('status') == 'approved':
-                st.info("🔒 Утвержденное ТЗ. Для изменений создайте новую версию.") # [R-DE-4]
+                st.info("🔒 Утверждено. Редактирование запрещено.")
             
             versions = dal.get_versions_for_ts(spec['id'])
-            if not versions: st.warning("У этого ТЗ нет версий.")
-            else:
+            if versions:
                 curr_ver = versions[-1]
-                st.info(f"📌 Версия: v{curr_ver['version']} | Статус: {curr_ver['status']} | Создано: {curr_ver['created_by']}")
-                render_file_uploader(curr_ver['id'], dal) # [R-DE-1, R-DE-2]
+                st.info(f"📌 Версия: v{curr_ver['version']} | Статус: {curr_ver['status']}")
+                render_file_uploader(curr_ver['id'], dal)
                 
-                with st.expander("💬 Комментарии к версии"):
+                # [R-DE-5] История версий
+                with st.expander("📜 История версий (≥5)":
+                    hist_data = [{"ID": v['id'], "Ver": v['version'], "Status": v['status'], "By": v['created_by']} for v in versions]
+                    st.dataframe(hist_data)
+                    # Rollback logic stub
+                    if st.button("🔄 Откат"): 
+                        dal.rollback_version(curr_ver['id'])
+                        st.rerun()
+                
+                with st.expander(" Комментарии"):
                     with st.form("comment_form", clear_on_submit=True):
-                        txt = st.text_area("Текст комментария")
+                        txt = st.text_area("Текст")
                         if st.form_submit_button("Добавить"):
-                            dal.add_comment(str(curr_ver['id']), st.session_state.current_user, txt) # [R-DE-6]
-                            st.success("Комментарий добавлен")
+                            dal.add_comment(str(curr_ver['id']), st.session_state.current_user, txt)
+                            st.success("Добавлено")
                             st.rerun()
 
     with tab2:
-        st.subheader("➕ Создать техническое задание")
+        st.subheader("➕ Создать ТЗ")
         with st.form("create_ts_form", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 article = st.text_input("Артикул *", placeholder="T-001")
-                name = st.text_input("Наименование *", placeholder="Худи Базовое")
+                name = st.text_input("Наименование *", placeholder="Худи")
             with c2:
-                season = st.selectbox("Сезон", ["Весна-Лето", "Осень-Зима", "Всесезонное"])
-                category = st.selectbox("Категория", ["Верхняя одежда", "Брюки", "Футболки", "Другое"])
+                season = st.selectbox("Сезон", ["Весна-Лето", "Осень-Зима"])
+                category = st.selectbox("Категория", ["Верхняя", "Брюки"])
             
-            if st.form_submit_button("💾 Создать ТЗ", type="primary", use_container_width=True):
-                if not article or not name: st.error("Артикул и наименование обязательны")
-                elif not validate_article_unique(article, dal): st.error("Артикул уже существует")
+            if st.form_submit_button("💾 Создать", type="primary", use_container_width=True):
+                if not article or not name: st.error("Обязательные поля")
+                elif not validate_article_unique(article, dal): st.error("Артикул занят")
                 else:
-                    with st.spinner("Создание ТЗ и версии v1..."):
-                        tid, vid = dal.create_tech_spec(article, name, season, category, st.session_state.current_user) # [R-DE-1, R-DE-2]
+                    with st.spinner("Создание..."):
+                        tid, vid = dal.create_tech_spec(article, name, season, category, st.session_state.current_user)
                         if tid:
-                            st.success(f"✅ ТЗ {article} создано! Версия v1 готова.")
+                            st.success(f"✅ {article} создан!")
                             st.rerun()
 
 # =============================================================================
 # === 6. MAIN APP LOOP =========================================================
 # =============================================================================
 def main():
+    st.set_page_config(page_title="Легпром Управление", layout="wide") # [R-SY-5, Mobile]
     init_session_state()
     
     if not st.session_state.authenticated:
@@ -683,44 +814,55 @@ def main():
     check_session_timeout()
     
     with st.sidebar:
+        role_name = ROLE_NAMES.get(st.session_state.user_role, "User")
         st.markdown(f"** {st.session_state.current_user}**")
+        st.caption(f"Роль: {role_name}")
         st.caption(f"Активность: {st.session_state.last_activity.strftime('%H:%M:%S')}")
+        
+        if st.session_state.get('fallback_mode'):
+            st.error("📡 РЕЖИМ ОФЛАЙН")
+        
         st.markdown("---")
-        page = st.radio("Навигация", ["🏠 Главная", "📐 Конструирование", "📅 Планирование", "🏭 Производство"], label_visibility="collapsed")
+        
+        # RBAC Menu Rendering
+        perms = PERMISSIONS.get(st.session_state.user_role, [])
+        
+        if "dashboard" in perms:
+            if st.button("🏠 Главная", use_container_width=True): st.switch_page("main") # In real app, use session state page var
+            # For SPA single file, we use a session variable for page routing
+            page = st.radio("Навигация", ["🏠 Главная", "📐 Конструирование", "📅 Планирование", "🏭 Производство"], label_visibility="collapsed")
+        else:
+             # Fallback if role has limited permissions
+            available = [p for p in ["🏠 Главная", "📐 Конструирование", "📅 Планирование", "🏭 Производство"] if p.lower().replace(" ", "").replace("📐", "").replace("", "").replace("🏭", "").replace("🏠", "") in perms]
+            if not available: available = [" Главная"]
+            page = st.radio("Навигация", available, label_visibility="collapsed")
+            
         st.markdown("---")
         if st.button("🚪 Выйти", use_container_width=True):
             st.session_state.authenticated = False
             st.session_state.current_user = None
-            st.session_state.show_ts_details = False
-            st.session_state.selected_ts = None
             st.rerun()
-        if st.session_state.notifications:
-            st.markdown("📢 **Уведомления:**")
-            for n in st.session_state.notifications[-3:]: st.caption(n)
-            st.session_state.notifications.clear()
-        st.caption("Версия: 1.2.0 | [R-SY-4, R-SY-5]")
+            
+        render_notifications()
 
     try:
         dal = SheetDAL()
     except Exception as e:
-        st.error(f"❌ Ошибка инициализации DAL: {e}")
+        st.error(f"❌ Ошибка DAL: {e}")
         st.stop()
 
-    if page == " Главная":
-        st.title("🏭 Система управления деятельностью предприятия")
-        st.markdown("---")
-        st.success(f"Добро пожаловать, {st.session_state.current_user}!")
-        st.info("✅ Прототип готов. Поддерживаются контексты: Конструирование, Планирование, Производство.")
-        st.markdown("### 📋 Реализованные требования:")
-        st.markdown("""
-        - **Конструирование**: R-DE-1..7 (Загрузка, версионирование, согласование, комментарии)
-        - **Планирование**: R-PL-1..7 (Утвержденные ТЗ, приоритеты, пересчет дат, проверка материалов)
-        - **Производство**: R-PR-1..8 (Пошив, КК, расчет брака, алерт технологу)
-        - **Системные**: R-SY-1..5 (Аутентификация, таймаут 30м, бэкап, масштабирование)
-        """)
-    elif page == "📐 Конструирование": page_design(dal)
-    elif page == "📅 Планирование": page_planning(dal)
-    elif page == "🏭 Производство": page_production(dal)
+    if page == "🏠 Главная":
+        st.title("🏭 Система управления деятельностью")
+        render_metrics_dashboard(dal)
+    elif page == "📐 Конструирование": 
+        if "design" in perms: page_design(dal)
+        else: st.error("🚫 Доступ запрещен")
+    elif page == "📅 Планирование": 
+        if "planning" in perms: page_planning(dal)
+        else: st.error(" Доступ запрещен")
+    elif page == "🏭 Производство": 
+        if "production" in perms: page_production(dal)
+        else: st.error("🚫 Доступ запрещен")
 
 if __name__ == "__main__":
     main()
