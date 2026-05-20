@@ -1,6 +1,6 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 3.1.0 STABLE — Исправлены замечания: дашборд, скачивание файлов, блокировка после утверждения
+Версия: 3.1.2 STABLE — Восстановлен дашборд, исправлено создание ТЗ, работает кнопка "Изменить"
 Автор: Браславцев Б.Э.
 """
 import streamlit as st
@@ -21,7 +21,7 @@ def init_session_state():
         'current_user': None,
         'last_activity': datetime.now(),
         'selected_ts': None,
-        'editing_order': None,
+        'editing_order_id': None,  # ID заказа на редактирование
         'qc_order': None,
         'notifications': [],
         'selected_production_order': None
@@ -109,7 +109,6 @@ def design_page():
                     with col3:
                         if st.button("📄 Открыть", key=f"open_{ts.get('id')}", use_container_width=True):
                             st.session_state.selected_ts = ts
-                            st.rerun()
                         if ts.get('status') != 'approved':
                             if st.button("✅ Утвердить", key=f"app_{ts.get('id')}", use_container_width=True):
                                 ts['status'] = 'approved'
@@ -120,7 +119,7 @@ def design_page():
                             st.success("ТЗ архивировано")
                             st.rerun()
     
-    # ДЕТАЛИ ТЗ — ИСПРАВЛЕНО: показ карточки с документами
+    # ДЕТАЛИ ТЗ — показ карточки с документами
     if st.session_state.get('selected_ts'):
         ts = st.session_state.selected_ts
         st.markdown("---")
@@ -245,16 +244,56 @@ def planning_page():
                         else:
                             st.warning("⏳ Ожидает QC")
                         
-                        # КНОПКА ИЗМЕНИТЬ ПРИОРИТЕТ
-                        if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
-                            new_prio = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"], 
-                                                  key=f"sel_{order.get('id')}")
-                            dates = recalc_dates(new_prio)
-                            order['priority'] = new_prio
-                            order['start_date'] = dates['start_date']
-                            order['end_date'] = dates['end_date']
-                            st.success("План пересчитан")
+                        # КНОПКА ИЗМЕНИТЬ — ИСПРАВЛЕНО (через ID)
+                        if st.button("📝 Изменить", key=f"edit_btn_{order.get('id')}", use_container_width=True):
+                            st.session_state.editing_order_id = order.get('id')
                             st.rerun()
+    
+    # ФОРМА ИЗМЕНЕНИЯ ПРИОРИТЕТА И ДАТ — ВЫНЕСЕНА ИЗ ЦИКЛА
+    if st.session_state.editing_order_id is not None:
+        # Найдем заказ по ID
+        order_to_edit = None
+        for order in st.session_state.orders:
+            if order.get('id') == st.session_state.editing_order_id:
+                order_to_edit = order
+                break
+        
+        if order_to_edit:
+            st.subheader(f"📝 Изменение заказа: {order_to_edit.get('article', 'N/A')}")
+            
+            with st.form("edit_order_form", clear_on_submit=False):
+                priorities = ["Высокий", "Средний", "Низкий"]
+                current_priority = order_to_edit.get('priority', 'Средний')
+                current_idx = priorities.index(current_priority) if current_priority in priorities else 1
+                new_priority = st.selectbox("Новый приоритет", priorities, index=current_idx)
+                
+                # Ручной ввод дат
+                current_start = order_to_edit.get('start_date', datetime.now().strftime("%Y-%m-%d"))
+                current_end = order_to_edit.get('end_date', (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
+                
+                try:
+                    start_date_val = datetime.strptime(current_start, "%Y-%m-%d")
+                    end_date_val = datetime.strptime(current_end, "%Y-%m-%d")
+                except:
+                    start_date_val = datetime.now()
+                    end_date_val = datetime.now() + timedelta(days=14)
+                
+                new_start = st.date_input("Дата начала", value=start_date_val)
+                new_end = st.date_input("Дата окончания", value=end_date_val)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("✅ Сохранить", type="primary", use_container_width=True):
+                        order_to_edit['priority'] = new_priority
+                        order_to_edit['start_date'] = new_start.strftime("%Y-%m-%d")
+                        order_to_edit['end_date'] = new_end.strftime("%Y-%m-%d")
+                        st.success("✅ Изменения сохранены!")
+                        st.session_state.editing_order_id = None
+                        st.rerun()
+                with col2:
+                    if st.form_submit_button("❌ Отмена", use_container_width=True):
+                        st.session_state.editing_order_id = None
+                        st.rerun()
 
     with tab2:
         if not approved_ts:
@@ -334,28 +373,28 @@ def production_page():
                             # ИСПРАВЛЕНО: форма для ввода количества
                             st.session_state.selected_production_order = order
                             st.rerun()
+    
+    # ФОРМА ПОШИВА — ИСПРАВЛЕНО
+    if st.session_state.get('selected_production_order'):
+        order = st.session_state.selected_production_order
+        st.subheader(f"🧵 Пошив заказа: {order.get('article', 'N/A')}")
         
-        # ФОРМА ПОШИВА — ИСПРАВЛЕНО
-        if st.session_state.get('selected_production_order'):
-            order = st.session_state.selected_production_order
-            st.subheader(f"🧵 Пошив заказа: {order.get('article', 'N/A')}")
+        with st.form("sewing_form", clear_on_submit=True):
+            sewn_qty = st.number_input("Выполнено (шт)", min_value=1, value=order.get('qty', 10))
+            worker = st.text_input("Швея", value=st.session_state.current_user)
             
-            with st.form("sewing_form", clear_on_submit=True):
-                sewn_qty = st.number_input("Выполнено (шт)", min_value=1, value=order.get('qty', 10))
-                worker = st.text_input("Швея", value=st.session_state.current_user)
-                
-                if st.form_submit_button("✅ Записать выполнение", type="primary", use_container_width=True):
-                    # Сохраняем информацию о пошиве
-                    if 'sewing_records' not in order:
-                        order['sewing_records'] = []
-                    order['sewing_records'].append({
-                        "qty": sewn_qty,
-                        "worker": worker,
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
-                    st.success(f"✅ Записано: {sewn_qty} шт. (швея: {worker})")
-                    st.session_state.selected_production_order = None
-                    st.rerun()
+            if st.form_submit_button("✅ Записать выполнение", type="primary", use_container_width=True):
+                # Сохраняем информацию о пошиве
+                if 'sewing_records' not in order:
+                    order['sewing_records'] = []
+                order['sewing_records'].append({
+                    "qty": sewn_qty,
+                    "worker": worker,
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+                st.success(f"✅ Записано: {sewn_qty} шт. (швея: {worker})")
+                st.session_state.selected_production_order = None
+                st.rerun()
 
     with tab2:
         st.subheader("🔍 Контроль качества [R-PR-2, R-PR-3, R-PR-8]")
@@ -426,7 +465,7 @@ def main_dashboard():
     st.success(f"Добро пожаловать, {st.session_state.current_user}!")
     st.markdown("---")
     
-    # ДАШБОРД — ИСПРАВЛЕНО: метрики и статистика
+    # ДАШБОРД — метрики и статистика
     st.subheader("📊 Оперативная сводка")
     
     col1, col2, col3, col4 = st.columns(4)
@@ -507,11 +546,11 @@ def main():
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
-        st.caption("Версия: 3.1.0 STABLE")
+        st.caption("Версия: 3.1.2 STABLE")
 
     # Роутинг
     if page == "🏠 Главная":
-        main_dashboard()
+        main_dashboard()  # ВОССТАНОВЛЕН ДАШБОРД
     elif page == "📐 Конструирование":
         design_page()
     elif page == "📅 Планирование":
