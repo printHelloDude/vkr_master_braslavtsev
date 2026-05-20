@@ -1,6 +1,6 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 3.1.4 STABLE — Исправлена загрузка цеха (учет по единицам, лимит 500)
+Версия: 3.1.5 STABLE — Исправлена кнопка "Изменить", добавлен архив заказов
 Автор: Браславцев Б.Э.
 """
 import streamlit as st
@@ -25,7 +25,7 @@ def init_session_state():
         'current_user': None,
         'last_activity': datetime.now(),
         'selected_ts': None,
-        'editing_order_id': None,
+        'editing_order_id': None,  # ID заказа на редактирование
         'qc_order': None,
         'notifications': [],
         'selected_production_order': None
@@ -250,6 +250,54 @@ def planning_page():
     capacity_pct = get_capacity_percentage()
     available_capacity = get_available_capacity()
     
+    # === ФОРМА ИЗМЕНЕНИЯ ПРИОРИТЕТА И ДАТ — СНАЧАЛА (ДО ТАБОВ) ===
+    if st.session_state.editing_order_id is not None:
+        # Найдем заказ по ID
+        order_to_edit = None
+        for order in st.session_state.orders:
+            if order.get('id') == st.session_state.editing_order_id:
+                order_to_edit = order
+                break
+        
+        if order_to_edit:
+            st.subheader(f"📝 Изменение заказа: {order_to_edit.get('article', 'N/A')}")
+            
+            with st.form("edit_order_form", clear_on_submit=False):
+                priorities = ["Высокий", "Средний", "Низкий"]
+                current_priority = order_to_edit.get('priority', 'Средний')
+                current_idx = priorities.index(current_priority) if current_priority in priorities else 1
+                new_priority = st.selectbox("Новый приоритет", priorities, index=current_idx)
+                
+                # Ручной ввод дат
+                current_start = order_to_edit.get('start_date', datetime.now().strftime("%Y-%m-%d"))
+                current_end = order_to_edit.get('end_date', (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
+                
+                try:
+                    start_date_val = datetime.strptime(current_start, "%Y-%m-%d")
+                    end_date_val = datetime.strptime(current_end, "%Y-%m-%d")
+                except:
+                    start_date_val = datetime.now()
+                    end_date_val = datetime.now() + timedelta(days=14)
+                
+                new_start = st.date_input("Дата начала", value=start_date_val)
+                new_end = st.date_input("Дата окончания", value=end_date_val)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("✅ Сохранить", type="primary", use_container_width=True):
+                        order_to_edit['priority'] = new_priority
+                        order_to_edit['start_date'] = new_start.strftime("%Y-%m-%d")
+                        order_to_edit['end_date'] = new_end.strftime("%Y-%m-%d")
+                        st.success("✅ Изменения сохранены!")
+                        st.session_state.editing_order_id = None
+                        st.rerun()
+                with col2:
+                    if st.form_submit_button("❌ Отмена", use_container_width=True):
+                        st.session_state.editing_order_id = None
+                        st.rerun()
+            
+            st.markdown("---")
+    
     tab1, tab2 = st.tabs(["📋 План производства", "➕ Добавить заказ"])
     
     with tab1:
@@ -288,23 +336,11 @@ def planning_page():
                         st.caption(f"Начало: {order.get('start_date', 'N/A')}")
                         st.caption(f"Конец: {order.get('end_date', 'N/A')}")
                     with col3:
-                        qc_status = order.get('qc_status', 'pending')
-                        if qc_status == 'passed':
-                            st.success("✅ QC пройден")
-                        else:
-                            st.warning("⏳ Ожидает QC")
-                        
-                        # КНОПКА ИЗМЕНИТЬ ПРИОРИТЕТ
+                        # КНОПКА ИЗМЕНИТЬ ПРИОРИТЕТ — РАБОТАЕТ ВСЕГДА
                         if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
-                            new_prio = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"], 
-                                                  key=f"sel_{order.get('id')}")
-                            dates = recalc_dates(new_prio)
-                            order['priority'] = new_prio
-                            order['start_date'] = dates['start_date']
-                            order['end_date'] = dates['end_date']
-                            st.success("План пересчитан")
+                            st.session_state.editing_order_id = order.get('id')
                             st.rerun()
-    
+
     with tab2:
         if not approved_ts:
             st.warning("⚠️ Нет утвержденных ТЗ")
@@ -364,7 +400,7 @@ def planning_page():
 def production_page():
     """Контекст: Производство [R-PR-1..8]."""
     st.title("🏭 Производство")
-    tab1, tab2 = st.tabs(["🧵 Пошив", "🔍 Контроль качества"])
+    tab1, tab2, tab3 = st.tabs(["🧵 Пошив", "🔍 Контроль качества", "📦 Прошлые заказы"])
 
     with tab1:
         st.info("📌 Пошив доступен только после QC")
@@ -501,6 +537,34 @@ def production_page():
                     st.session_state.qc_order = None
                     st.rerun()
 
+    # === НОВАЯ ВКЛАДКА: ПРОШЛЫЕ ЗАКАЗЫ (АРХИВ) ===
+    with tab3:
+        st.subheader("📦 Архив завершенных заказов")
+        
+        archived_orders = [o for o in st.session_state.orders if o.get('status') == 'archived']
+        
+        if not archived_orders:
+            st.info("📌 Нет завершенных заказов")
+        else:
+            st.success(f"✅ Найдено {len(archived_orders)} завершенных заказов")
+            
+            for order in archived_orders:
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([3, 2, 2])
+                    with col1:
+                        st.markdown(f"**{order.get('article', 'N/A')}**")
+                        st.caption(f"Заказ #{order.get('id')} | Партия: {order.get('qty', 0)} шт.")
+                    with col2:
+                        st.caption(f"Завершен: {order.get('completed_at', 'N/A')}")
+                        defect_rate = order.get('defect_rate', 0.0)
+                        st.caption(f"Брак: {defect_rate}%")
+                    with col3:
+                        # Показываем записи о пошиве
+                        if order.get('sewing_records'):
+                            for record in order['sewing_records']:
+                                st.success(f"✅ {record.get('qty')} шт. ({record.get('worker', 'N/A')})")
+                                st.caption(f"🕐 {record.get('date', 'N/A')}")
+
 def main_dashboard():
     """Главная страница с дашбордом."""
     st.title("🏭 Система управления предприятием")
@@ -584,7 +648,7 @@ def main():
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
-        st.caption("Версия: 3.1.4 STABLE")
+        st.caption("Версия: 3.1.5 STABLE")
 
     # Роутинг
     if page == "🏠 Главная":
