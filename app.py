@@ -1,6 +1,6 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 3.1.3 STABLE — Восстановлен контроль брака, архивация заказов
+Версия: 3.1.4 STABLE — Исправлена загрузка цеха (учет по единицам, лимит 500)
 Автор: Браславцев Б.Э.
 """
 import streamlit as st
@@ -11,6 +11,10 @@ import io
 # ============================================================================
 # === 1. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ ========================================
 # ============================================================================
+
+# Константы
+MAX_SHOP_CAPACITY = 500  # Максимальная загрузка цеха в единицах
+WARNING_CAPACITY_THRESHOLD = 0.8  # Порог предупреждения (80%)
 
 def init_session_state():
     """Инициализация хранилища данных в памяти."""
@@ -57,6 +61,30 @@ def recalc_dates(priority: str) -> Dict[str, str]:
         "start_date": start.strftime("%Y-%m-%d"),
         "end_date": end.strftime("%Y-%m-%d")
     }
+
+def calculate_current_load() -> int:
+    """Рассчитать текущую загрузку цеха (сумма всех активных заказов)."""
+    total = 0
+    for order in st.session_state.orders:
+        # Считаем только активные заказы (не архивные)
+        if order.get('status') != 'archived':
+            total += order.get('qty', 0)
+    return total
+
+def get_capacity_percentage() -> float:
+    """Получить процент загрузки цеха."""
+    current_load = calculate_current_load()
+    return (current_load / MAX_SHOP_CAPACITY) * 100
+
+def is_capacity_available(qty: int = 0) -> bool:
+    """Проверить, есть ли место для нового заказа."""
+    current_load = calculate_current_load()
+    return (current_load + qty) <= MAX_SHOP_CAPACITY
+
+def get_available_capacity() -> int:
+    """Получить доступную мощность цеха."""
+    current_load = calculate_current_load()
+    return max(0, MAX_SHOP_CAPACITY - current_load)
 
 # ============================================================================
 # === 3. СТРАНИЦЫ ПРИЛОЖЕНИЯ =================================================
@@ -109,6 +137,7 @@ def design_page():
                     with col3:
                         if st.button("📄 Открыть", key=f"open_{ts.get('id')}", use_container_width=True):
                             st.session_state.selected_ts = ts
+                            st.rerun()
                         if ts.get('status') != 'approved':
                             if st.button("✅ Утвердить", key=f"app_{ts.get('id')}", use_container_width=True):
                                 ts['status'] = 'approved'
@@ -119,15 +148,17 @@ def design_page():
                             st.success("ТЗ архивировано")
                             st.rerun()
     
-    # ДЕТАЛИ ТЗ
+    # ДЕТАЛИ ТЗ — показ карточки с документами
     if st.session_state.get('selected_ts'):
         ts = st.session_state.selected_ts
         st.markdown("---")
         st.subheader(f"📦 {ts.get('article', 'N/A')} — {ts.get('name', '')}")
         
+        # Блокировка после утверждения
         if ts.get('status') == 'approved':
             st.error("🔒 Утвержденное ТЗ. Редактирование заблокировано.")
         
+        # [R-DE-1] Загрузка документов ТЗ (только если не утверждено)
         st.subheader("📄 Документация ТЗ")
         if ts.get('status') != 'approved':
             with st.form("upload_ts_doc", clear_on_submit=True):
@@ -143,7 +174,7 @@ def design_page():
                             ts['documents'].append({
                                 "type": doc_type,
                                 "filename": file.name,
-                                "data": file.getvalue(),
+                                "data": file.getvalue(),  # Сохраняем для скачивания
                                 "size": file.size,
                                 "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             })
@@ -154,6 +185,7 @@ def design_page():
         else:
             st.info("📌 Загрузка документов заблокирована (ТЗ утверждено)")
         
+        # Отображение загруженных документов с возможностью скачивания
         if ts.get('documents'):
             st.write("**Загруженные документы:**")
             for i, doc in enumerate(ts['documents']):
@@ -161,6 +193,7 @@ def design_page():
                 with col1:
                     st.caption(f"📄 {doc.get('type', 'Document')} — {doc.get('filename', 'unknown')} ({doc.get('size', 0) / 1024:.1f} KB)")
                 with col2:
+                    # Кнопка скачивания
                     st.download_button(
                         label="⬇️ Скачать",
                         data=doc.get('data', b''),
@@ -170,6 +203,7 @@ def design_page():
                         use_container_width=True
                     )
         
+        # Кнопка закрытия
         if st.button("← Закрыть карточку", key=f"close_{ts.get('id')}"):
             st.session_state.selected_ts = None
             st.rerun()
@@ -198,7 +232,7 @@ def design_page():
                         "status": "draft",
                         "version": 1,
                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "documents": []
+                        "documents": []  # Отдельно храним документы
                     }
                     st.session_state.tech_specs.append(new_ts)
                     st.success(f"✅ ТЗ {article} создан!")
@@ -208,18 +242,38 @@ def planning_page():
     """Контекст: Планирование [R-PL-1..7]."""
     st.title("📅 Планирование")
     
+    # [R-PL-1] Только утвержденные ТЗ
     approved_ts = [ts for ts in st.session_state.tech_specs if ts.get('status') == 'approved']
+    
+    # Расчет загрузки цеха
+    current_load = calculate_current_load()
+    capacity_pct = get_capacity_percentage()
+    available_capacity = get_available_capacity()
     
     tab1, tab2 = st.tabs(["📋 План производства", "➕ Добавить заказ"])
     
     with tab1:
         st.subheader("Календарный план")
+        
+        # ИНДИКАТОР ЗАГРУЗКИ ЦЕХА — ИСПРАВЛЕНО
+        st.metric("Загрузка цеха", f"{current_load} / {MAX_SHOP_CAPACITY} ед. ({capacity_pct:.1f}%)")
+        
+        # Визуальная индикация загрузки
+        if capacity_pct >= 100:
+            st.error(f"🚨 ЦЕХ ПОЛНОСТЬЮ ЗАГРУЖЕН! Доступно: 0 ед.")
+            st.progress(1.0)
+        elif capacity_pct >= WARNING_CAPACITY_THRESHOLD * 100:
+            st.warning(f"⚠️ ВЫСОКАЯ ЗАГРУЗКА! Осталось мест: {available_capacity} ед.")
+            st.progress(capacity_pct / 100)
+        else:
+            st.success(f"✅ Доступно для заказов: {available_capacity} ед.")
+            st.progress(capacity_pct / 100)
+        
         if not st.session_state.orders:
             st.info("Нет заказов в плане")
         else:
-            st.metric("Загрузка цеха", f"{min(len(st.session_state.orders) * 15, 100)}%")
-            
             for order in st.session_state.orders:
+                # Пропускаем архивные заказы
                 if order.get('status') == 'archived':
                     continue
                     
@@ -228,6 +282,7 @@ def planning_page():
                     with col1:
                         st.markdown(f"**{order.get('article', 'N/A')}**")
                         st.caption(f"Приоритет: {order.get('priority', 'Средний')}")
+                        # ИНДИКАТОР КОЛИЧЕСТВА
                         st.info(f"📦 **{order.get('qty', 0)} шт.** в партии")
                     with col2:
                         st.caption(f"Начало: {order.get('start_date', 'N/A')}")
@@ -239,86 +294,72 @@ def planning_page():
                         else:
                             st.warning("⏳ Ожидает QC")
                         
-                        if st.button("📝 Изменить", key=f"edit_btn_{order.get('id')}", use_container_width=True):
-                            st.session_state.editing_order_id = order.get('id')
+                        # КНОПКА ИЗМЕНИТЬ ПРИОРИТЕТ
+                        if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
+                            new_prio = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"], 
+                                                  key=f"sel_{order.get('id')}")
+                            dates = recalc_dates(new_prio)
+                            order['priority'] = new_prio
+                            order['start_date'] = dates['start_date']
+                            order['end_date'] = dates['end_date']
+                            st.success("План пересчитан")
                             st.rerun()
     
-    if st.session_state.editing_order_id is not None:
-        order_to_edit = None
-        for order in st.session_state.orders:
-            if order.get('id') == st.session_state.editing_order_id:
-                order_to_edit = order
-                break
-        
-        if order_to_edit:
-            st.subheader(f"📝 Изменение заказа: {order_to_edit.get('article', 'N/A')}")
-            
-            with st.form("edit_order_form", clear_on_submit=False):
-                priorities = ["Высокий", "Средний", "Низкий"]
-                current_priority = order_to_edit.get('priority', 'Средний')
-                current_idx = priorities.index(current_priority) if current_priority in priorities else 1
-                new_priority = st.selectbox("Новый приоритет", priorities, index=current_idx)
-                
-                current_start = order_to_edit.get('start_date', datetime.now().strftime("%Y-%m-%d"))
-                current_end = order_to_edit.get('end_date', (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
-                
-                try:
-                    start_date_val = datetime.strptime(current_start, "%Y-%m-%d")
-                    end_date_val = datetime.strptime(current_end, "%Y-%m-%d")
-                except:
-                    start_date_val = datetime.now()
-                    end_date_val = datetime.now() + timedelta(days=14)
-                
-                new_start = st.date_input("Дата начала", value=start_date_val)
-                new_end = st.date_input("Дата окончания", value=end_date_val)
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.form_submit_button("✅ Сохранить", type="primary", use_container_width=True):
-                        order_to_edit['priority'] = new_priority
-                        order_to_edit['start_date'] = new_start.strftime("%Y-%m-%d")
-                        order_to_edit['end_date'] = new_end.strftime("%Y-%m-%d")
-                        st.success("✅ Изменения сохранены!")
-                        st.session_state.editing_order_id = None
-                        st.rerun()
-                with col2:
-                    if st.form_submit_button("❌ Отмена", use_container_width=True):
-                        st.session_state.editing_order_id = None
-                        st.rerun()
-
     with tab2:
         if not approved_ts:
             st.warning("⚠️ Нет утвержденных ТЗ")
         else:
-            st.info("✅ Доступны только утвержденные ТЗ")
-            with st.form("add_order", clear_on_submit=True):
-                ts_options = {f"{ts.get('article')} - {ts.get('name')}": ts for ts in approved_ts}
-                selected = st.selectbox("Выберите ТЗ", list(ts_options.keys()))
-                priority = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"])
-                qty = st.number_input("Количество", min_value=50, value=100)
+            # ПРОВЕРКА ДОСТУПНОЙ МОЩНОСТИ
+            if available_capacity <= 0:
+                st.error("🚨 НЕВОЗМОЖНО ДОБАВИТЬ ЗАКАЗ! Цех полностью загружен (500/500 ед.)")
+                st.info("💡 Сначала закройте выполненные заказы или удалите ненужные.")
+            else:
+                st.info(f"✅ Доступно для заказов: {available_capacity} из {MAX_SHOP_CAPACITY} ед.")
                 
-                start_date = st.date_input("Дата начала производства", 
-                                          value=datetime.now() + timedelta(days=7))
-                end_date = st.date_input("Дата окончания производства",
-                                        value=datetime.now() + timedelta(days=21))
-                
-                if st.form_submit_button("➕ Добавить в план", type="primary", use_container_width=True):
-                    ts = ts_options[selected]
-                    new_order = {
-                        "id": get_next_id(st.session_state.orders),
-                        "tech_spec_id": ts.get('id'),
-                        "article": ts.get('article'),
-                        "priority": priority,
-                        "qty": qty,
-                        "start_date": start_date.strftime("%Y-%m-%d"),
-                        "end_date": end_date.strftime("%Y-%m-%d"),
-                        "status": "planned",
-                        "qc_status": "pending",
-                        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
-                    st.session_state.orders.append(new_order)
-                    st.success("✅ Заказ добавлен в план")
-                    st.rerun()
+                with st.form("add_order", clear_on_submit=True):
+                    ts_options = {f"{ts.get('article')} - {ts.get('name')}": ts for ts in approved_ts}
+                    selected = st.selectbox("Выберите ТЗ", list(ts_options.keys()))
+                    priority = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"])
+                    
+                    # Ограничение по количеству с учетом доступной мощности
+                    max_qty = min(available_capacity, 500)  # Не больше 500 за раз
+                    qty = st.number_input("Количество в партии", 
+                                        min_value=50, 
+                                        max_value=max_qty,
+                                        value=min(100, max_qty))
+                    
+                    # Предупреждение если заказ превышает доступную мощность
+                    if qty > available_capacity:
+                        st.error(f"⚠️ Заказ ({qty} ед.) превышает доступную мощность ({available_capacity} ед.)")
+                    
+                    # РУЧНОЙ ВВОД ДАТ
+                    start_date = st.date_input("Дата начала производства", 
+                                              value=datetime.now() + timedelta(days=7))
+                    end_date = st.date_input("Дата окончания производства",
+                                            value=datetime.now() + timedelta(days=21))
+                    
+                    if st.form_submit_button("➕ Добавить в план", type="primary", use_container_width=True):
+                        # ФИНАЛЬНАЯ ПРОВЕРКА ПЕРЕД ДОБАВЛЕНИЕМ
+                        if not is_capacity_available(qty):
+                            st.error(f"❌ НЕДОСТАТОЧНО МОЩНОСТИ! Доступно: {available_capacity} ед., требуется: {qty} ед.")
+                            st.info("💡 Закройте выполненные заказы или уменьшите количество.")
+                        else:
+                            ts = ts_options[selected]
+                            new_order = {
+                                "id": get_next_id(st.session_state.orders),
+                                "tech_spec_id": ts.get('id'),
+                                "article": ts.get('article'),
+                                "priority": priority,
+                                "qty": qty,
+                                "start_date": start_date.strftime("%Y-%m-%d"),
+                                "end_date": end_date.strftime("%Y-%m-%d"),
+                                "status": "planned",
+                                "qc_status": "pending",
+                                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            st.session_state.orders.append(new_order)
+                            st.success(f"✅ Заказ добавлен в план! Осталось мест: {get_available_capacity()} ед.")
+                            st.rerun()
 
 def production_page():
     """Контекст: Производство [R-PR-1..8]."""
@@ -328,12 +369,15 @@ def production_page():
     with tab1:
         st.info("📌 Пошив доступен только после QC")
         
-        active_orders = [o for o in st.session_state.orders if o.get('status') != 'archived']
-        
-        if not active_orders:
-            st.info("Нет активных заказов.")
+        if not st.session_state.orders:
+            st.info("Нет заказов.")
         else:
-            for order in active_orders:
+            for order in st.session_state.orders:
+                # Пропускаем архивные заказы
+                if order.get('status') == 'archived':
+                    continue
+                    
+                # БЕЗОПАСНОЕ ПОЛУЧЕНИЕ ДАННЫХ
                 article = order.get('article', 'N/A')
                 order_id = order.get('id', 0)
                 qty = order.get('qty', 0)
@@ -345,24 +389,19 @@ def production_page():
                     with col1:
                         st.markdown(f"**{article}**")
                         st.caption(f"Заказ #{order_id} | Партия: {qty} шт.")
-                        
-                        # ИНДИКАТОР БРАКА — ВОССТАНОВЛЕНО
-                        if qc_status == 'passed':
-                            if defect_rate > 0:
-                                if defect_rate > 5.0:
-                                    st.error(f"🚨 Брак: **{defect_rate}%** (ПРЕВЫШЕНИЕ!)")
-                                else:
-                                    st.success(f"✅ Брак: {defect_rate}% (норма)")
+                        # ИНДИКАТОР БРАКА (если QC пройден)
+                        if qc_status == 'passed' and defect_rate > 0:
+                            if defect_rate > 5.0:
+                                st.error(f"🚨 Брак: **{defect_rate}%**")
                             else:
-                                st.success("✅ Брак: 0% (идеально)")
-                    
+                                st.success(f"✅ Брак: {defect_rate}% (норма)")
                     with col2:
                         if qc_status == 'passed':
                             st.success("✅ QC пройден")
                         else:
                             st.warning("🚫 QC не пройден")
-                    
                     with col3:
+                        # [R-PR-5] Блокировка без QC
                         disabled = qc_status != 'passed'
                         if st.button("✅ Закрыть заказ", key=f"sew_{order_id}", 
                                    disabled=disabled, use_container_width=True):
@@ -391,6 +430,7 @@ def production_page():
                     order['status'] = 'archived'
                     order['completed_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     st.success(f"✅ Заказ закрыт! Выполнено: {sewn_qty} шт. (швея: {worker})")
+                    st.info(f"📊 Освобождено мощности: {order.get('qty', 0)} ед. Доступно: {get_available_capacity()} ед.")
                     st.session_state.selected_production_order = None
                     st.rerun()
             with col2:
@@ -418,19 +458,23 @@ def production_page():
                         st.session_state.qc_order = order
                         st.rerun()
         
+        # ФОРМА QC
         if st.session_state.get('qc_order'):
             order = st.session_state.qc_order
             article = order.get('article', 'N/A')
-            order_qty = order.get('qty', 100)
+            order_qty = order.get('qty', 100)  # БЕРЕМ КОЛИЧЕСТВО ИЗ ЗАКАЗА!
             
             st.subheader(f"🔍 QC: {article}")
             
             with st.form("qc_form", clear_on_submit=True):
+                # [ИСПРАВЛЕНО] По умолчанию количество из заказа
                 total = st.number_input("Всего изделий", min_value=1, value=order_qty)
                 defects = st.number_input("Обнаружено дефектов", min_value=0, value=0)
                 
+                # [R-PR-3] Авто расчет % брака
                 rate = calculate_defect_rate(defects, total)
                 
+                # Визуальная индикация
                 if rate > 5.0:
                     st.error(f"🚨 КРИТИЧЕСКИЙ БРАК: **{rate}%** (порог 5%)")
                 elif rate > 3.0:
@@ -439,9 +483,11 @@ def production_page():
                     st.success(f"✅ Брак в норме: **{rate}%**")
                 
                 if st.form_submit_button("💾 Сохранить", type="primary", use_container_width=True):
+                    # [R-PR-8] Алерт при браке > 5%
                     if rate > 5.0:
                         order['qc_status'] = 'failed'
                         st.error(f"🚨 БРАК >5%! Технологу отправлен сигнал")
+                        # Добавляем уведомление
                         st.session_state.notifications.append({
                             "msg": f"🚨 БРАК {rate}% в заказе {article}!",
                             "time": datetime.now().strftime("%H:%M"),
@@ -461,33 +507,43 @@ def main_dashboard():
     st.success(f"Добро пожаловать, {st.session_state.current_user}!")
     st.markdown("---")
     
+    # ДАШБОРД — метрики и статистика
     st.subheader("📊 Оперативная сводка")
     
     col1, col2, col3, col4 = st.columns(4)
     
-    total_orders = len(st.session_state.orders)
+    # Метрики
+    total_orders = len([o for o in st.session_state.orders if o.get('status') != 'archived'])
     approved_ts = len([ts for ts in st.session_state.tech_specs if ts.get('status') == 'approved'])
-    active_orders = len([o for o in st.session_state.orders if o.get('status') != 'archived'])
     archived_orders = len([o for o in st.session_state.orders if o.get('status') == 'archived'])
+    current_load = calculate_current_load()
+    capacity_pct = get_capacity_percentage()
     
     with col1:
         st.metric("📋 Всего ТЗ", approved_ts, delta=f"из {len(st.session_state.tech_specs)}")
     with col2:
-        st.metric("📅 Активных заказов", active_orders)
+        st.metric("📅 Активных заказов", total_orders)
     with col3:
         st.metric("📦 Завершено", archived_orders)
     with col4:
-        st.metric("⏳ Ожидает QC", len([o for o in st.session_state.orders if o.get('qc_status') == 'pending']))
+        st.metric("⏳ Загрузка цеха", f"{capacity_pct:.0f}%", delta=f"{current_load}/{MAX_SHOP_CAPACITY} ед.")
     
     st.markdown("---")
     
-    if active_orders > 0:
-        capacity = min(active_orders * 15, 100)
-        st.progress(capacity / 100)
-        st.caption(f"Текущая загрузка: {capacity}%")
-    else:
-        st.info("📌 Нет активных заказов")
+    # Загрузка цеха — визуализация
+    st.subheader("🏭 Загрузка производственных мощностей")
     
+    if capacity_pct >= 100:
+        st.error("🚨 ЦЕХ ПОЛНОСТЬЮ ЗАГРУЖЕН!")
+        st.progress(1.0)
+    elif capacity_pct >= WARNING_CAPACITY_THRESHOLD * 100:
+        st.warning(f"⚠️ Высокая загрузка! Осталось: {get_available_capacity()} ед.")
+        st.progress(capacity_pct / 100)
+    else:
+        st.success(f"✅ Доступно: {get_available_capacity()} из {MAX_SHOP_CAPACITY} ед.")
+        st.progress(capacity_pct / 100)
+    
+    # Уведомления
     if st.session_state.notifications:
         st.markdown("---")
         st.subheader("🔔 Последние уведомления")
@@ -502,6 +558,7 @@ def main():
     st.set_page_config(page_title="Легпром Управление", layout="wide")
     init_session_state()
     
+    # Проверка таймаута [R-SY-2]
     if st.session_state.authenticated and st.session_state.last_activity:
         inactive = datetime.now() - st.session_state.last_activity
         if inactive > timedelta(minutes=30):
@@ -515,6 +572,7 @@ def main():
         login_page()
         return
 
+    # Сайдбар
     with st.sidebar:
         st.markdown(f"**👤 {st.session_state.current_user}**")
         st.markdown("---")
@@ -526,8 +584,9 @@ def main():
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
-        st.caption("Версия: 3.1.3 STABLE")
+        st.caption("Версия: 3.1.4 STABLE")
 
+    # Роутинг
     if page == "🏠 Главная":
         main_dashboard()
     elif page == "📐 Конструирование":
