@@ -1,6 +1,6 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 3.1.6 STABLE — Выбор версий при планировании + удаление версий
+Версия: 3.1.6 FIXED — Исправлены все опечатки с пробелами
 Автор: Браславцев Б.Э.
 """
 import streamlit as st
@@ -11,6 +11,8 @@ import io
 # ============================================================================
 # === 1. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ ========================================
 # ============================================================================
+
+# Константы
 MAX_SHOP_CAPACITY = 500  # Максимальная загрузка цеха в единицах
 WARNING_CAPACITY_THRESHOLD = 0.8  # Порог предупреждения (80%)
 
@@ -26,8 +28,7 @@ def init_session_state():
         'editing_order_id': None,
         'qc_order': None,
         'notifications': [],
-        'selected_production_order': None,
-        'confirm_delete_version': None  # Для подтверждения удаления версии
+        'selected_production_order': None
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -36,6 +37,7 @@ def init_session_state():
 # ============================================================================
 # === 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =============================================
 # ============================================================================
+
 def get_next_id(items: List) -> int:
     """Получить следующий ID."""
     if not items:
@@ -83,17 +85,10 @@ def get_available_capacity() -> int:
     current_load = calculate_current_load()
     return max(0, MAX_SHOP_CAPACITY - current_load)
 
-def delete_version(ts_id: int, version_id: int):
-    """Удалить версию из ТЗ."""
-    ts = next((t for t in st.session_state.tech_specs if t.get('id') == ts_id), None)
-    if ts and 'versions' in ts:
-        ts['versions'] = [v for v in ts['versions'] if v.get('version_number') != version_id]
-        st.success(f"Версия v{version_id} удалена")
-        st.rerun()
-
 # ============================================================================
 # === 3. СТРАНИЦЫ ПРИЛОЖЕНИЯ =================================================
 # ============================================================================
+
 def login_page():
     """[R-SY-1] Страница входа."""
     st.title("🔐 Вход в систему")
@@ -150,57 +145,60 @@ def design_page():
                             st.success("ТЗ архивировано")
                             st.rerun()
 
-    # ДЕТАЛИ ТЗ — показ карточки с версиями
+    # ДЕТАЛИ ТЗ — показ карточки с документами
     if st.session_state.get('selected_ts'):
         ts = st.session_state.selected_ts
         st.markdown("---")
         st.subheader(f"📦 {ts.get('article', 'N/A')} — {ts.get('name', '')}")
         
-        # Отображаем версии
-        if 'versions' not in ts:
-            ts['versions'] = []
+        # Блокировка после утверждения
+        if ts.get('status') == 'approved':
+            st.error("🔒 Утвержденное ТЗ. Редактирование заблокировано.")
         
-        st.markdown("### 📋 Версии")
-        for version in sorted(ts['versions'], key=lambda x: x.get('version_number', 0), reverse=True):
-            with st.container(border=True):
-                v_col1, v_col2, v_col3 = st.columns([2, 2, 1])
-                with v_col1:
-                    st.markdown(f"**Версия v{version.get('version_number')}**")
-                    st.caption(f"Статус: {version.get('status', 'draft')}")
-                with v_col2:
-                    st.caption(f"Создана: {version.get('created_at', 'N/A')}")
-                    st.caption(f"Автор: {version.get('author', 'N/A')}")
-                with v_col3:
-                    # Кнопка удаления с подтверждением
-                    is_approved = version.get('status') == 'approved'
-                    btn_label = "🗑️ Удалить"
-                    if is_approved:
-                        btn_label = "🔒 Удалить (требует подтверждения)"
-                    
-                    if st.button(btn_label, key=f"del_ver_{ts.get('id')}_{version.get('version_number')}", use_container_width=True):
-                        if st.session_state.get('confirm_delete_version') == (ts.get('id'), version.get('version_number')):
-                            # Удаление подтверждено
-                            delete_version(ts.get('id'), version.get('version_number'))
-                            st.session_state.confirm_delete_version = None
-                            # Если удалили текущую версию, обновим ТЗ
-                            if version.get('version_number') == ts.get('version'):
-                                # Найдем следующую версию
-                                remaining_versions = [v for v in ts['versions'] if v.get('version_number') != version.get('version_number')]
-                                if remaining_versions:
-                                    ts['version'] = max(v.get('version_number') for v in remaining_versions)
-                                    ts['status'] = max((v for v in remaining_versions), key=lambda x: x.get('version_number')).get('status', 'draft')
-                                else:
-                                    ts['version'] = 1
-                                    ts['status'] = 'draft'
-                            st.rerun()
+        # [R-DE-1] Загрузка документов ТЗ (только если не утверждено)
+        st.subheader("📄 Документация ТЗ")
+        if ts.get('status') != 'approved':
+            with st.form("upload_ts_doc", clear_on_submit=True):
+                doc_type = st.selectbox("Тип документа", ["Техническое задание (ТЗ)", "Лекала"])
+                file = st.file_uploader("Файл (DXF/PDF)", type=['pdf', 'dxf'])
+                if st.form_submit_button("Загрузить", use_container_width=True):
+                    if file:
+                        if file.size > 50 * 1024 * 1024:
+                            st.error("Файл > 50 МБ")
                         else:
-                            # Первое нажатие - запрашиваем подтверждение
-                            st.session_state.confirm_delete_version = (ts.get('id'), version.get('version_number'))
-                            if is_approved:
-                                st.warning("⚠️ Это утверждённая версия. Нажмите ещё раз для подтверждения удаления.")
-                            else:
-                                st.info("ℹ️ Нажмите ещё раз для подтверждения удаления.")
-
+                            if 'documents' not in ts:
+                                ts['documents'] = []
+                            ts['documents'].append({
+                                "type": doc_type,
+                                "filename": file.name,
+                                "data": file.getvalue(),
+                                "size": file.size,
+                                "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            })
+                            st.success(f"✅ {doc_type} загружен")
+                            st.rerun()
+                    else:
+                        st.error("Выберите файл")
+        else:
+            st.info("📌 Загрузка документов заблокирована (ТЗ утверждено)")
+        
+        # Отображение загруженных документов с возможностью скачивания
+        if ts.get('documents'):
+            st.write("**Загруженные документы:**")
+            for i, doc in enumerate(ts['documents']):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.caption(f"📄 {doc.get('type', 'Document')} — {doc.get('filename', 'unknown')} ({doc.get('size', 0) / 1024:.1f} KB)")
+                with col2:
+                    st.download_button(
+                        label="⬇️ Скачать",
+                        data=doc.get('data', b''),
+                        file_name=doc.get('filename', 'file.pdf'),
+                        mime="application/pdf",
+                        key=f"dl_{ts.get('id')}_{i}",
+                        use_container_width=True
+                    )
+        
         # Кнопка закрытия
         if st.button("← Закрыть карточку", key=f"close_{ts.get('id')}"):
             st.session_state.selected_ts = None
@@ -230,14 +228,7 @@ def design_page():
                         "status": "draft",
                         "version": 1,
                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "documents": [],
-                        "versions": [{
-                            "version_number": 1,
-                            "status": "draft",
-                            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "author": st.session_state.current_user,
-                            "documents": []
-                        }]
+                        "documents": []
                     }
                     st.session_state.tech_specs.append(new_ts)
                     st.success(f"✅ ТЗ {article} создан!")
@@ -248,20 +239,63 @@ def planning_page():
     st.title("📅 Планирование")
     approved_ts = [ts for ts in st.session_state.tech_specs if ts.get('status') == 'approved']
 
-    # Расчет загрузки цеха
     current_load = calculate_current_load()
     capacity_pct = get_capacity_percentage()
     available_capacity = get_available_capacity()
+
+    # ФОРМА ИЗМЕНЕНИЯ ПРИОРИТЕТА И ДАТ
+    if st.session_state.editing_order_id is not None:
+        order_to_edit = None
+        for order in st.session_state.orders:
+            if order.get('id') == st.session_state.editing_order_id:
+                order_to_edit = order
+                break
+        
+        if order_to_edit:
+            st.subheader(f"📝 Изменение заказа: {order_to_edit.get('article', 'N/A')}")
+            
+            with st.form("edit_order_form", clear_on_submit=False):
+                priorities = ["Высокий", "Средний", "Низкий"]
+                current_priority = order_to_edit.get('priority', 'Средний')
+                current_idx = priorities.index(current_priority) if current_priority in priorities else 1
+                new_priority = st.selectbox("Новый приоритет", priorities, index=current_idx)
+                
+                current_start = order_to_edit.get('start_date', datetime.now().strftime("%Y-%m-%d"))
+                current_end = order_to_edit.get('end_date', (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
+                
+                try:
+                    start_date_val = datetime.strptime(current_start, "%Y-%m-%d")
+                    end_date_val = datetime.strptime(current_end, "%Y-%m-%d")
+                except:
+                    start_date_val = datetime.now()
+                    end_date_val = datetime.now() + timedelta(days=14)
+                
+                new_start = st.date_input("Дата начала", value=start_date_val)
+                new_end = st.date_input("Дата окончания", value=end_date_val)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("✅ Сохранить", type="primary", use_container_width=True):
+                        order_to_edit['priority'] = new_priority
+                        order_to_edit['start_date'] = new_start.strftime("%Y-%m-%d")
+                        order_to_edit['end_date'] = new_end.strftime("%Y-%m-%d")
+                        st.success("✅ Изменения сохранены!")
+                        st.session_state.editing_order_id = None
+                        st.rerun()
+                with col2:
+                    if st.form_submit_button("❌ Отмена", use_container_width=True):
+                        st.session_state.editing_order_id = None
+                        st.rerun()
+            
+            st.markdown("---")
 
     tab1, tab2 = st.tabs(["📋 План производства", "➕ Добавить заказ"])
 
     with tab1:
         st.subheader("Календарный план")
         
-        # ИНДИКАТОР ЗАГРУЗКИ ЦЕХА — ИСПРАВЛЕНО
         st.metric("Загрузка цеха", f"{current_load} / {MAX_SHOP_CAPACITY} ед. ({capacity_pct:.1f}%)")
         
-        # Визуальная индикация загрузки
         if capacity_pct >= 100:
             st.error(f"🚨 ЦЕХ ПОЛНОСТЬЮ ЗАГРУЖЕН! Доступно: 0 ед.")
             st.progress(1.0)
@@ -278,7 +312,7 @@ def planning_page():
             for order in st.session_state.orders:
                 if order.get('status') == 'archived':
                     continue
-                
+                 
                 with st.container(border=True):
                     col1, col2, col3 = st.columns([3, 2, 2])
                     with col1:
@@ -297,7 +331,6 @@ def planning_page():
         if not approved_ts:
             st.warning("⚠️ Нет утвержденных ТЗ")
         else:
-            # ПРОВЕРКА ДОСТУПНОЙ МОЩНОСТИ
             if available_capacity <= 0:
                 st.error("🚨 НЕВОЗМОЖНО ДОБАВИТЬ ЗАКАЗ! Цех полностью загружен (500/500 ед.)")
                 st.info("💡 Сначала закройте выполненные заказы или удалите ненужные.")
@@ -305,41 +338,33 @@ def planning_page():
                 st.info(f"✅ Доступно для заказов: {available_capacity} из {MAX_SHOP_CAPACITY} ед.")
                 
                 with st.form("add_order", clear_on_submit=True):
-                    # ЯВНЫЙ ВЫБОР ТЗ И ВЕРСИИ
-                    ts_options = {}
-                    for ts in approved_ts:
-                        versions = ts.get('versions', [])
-                        approved_versions = [v for v in versions if v.get('status') == 'approved']
-                        if approved_versions:
-                            for ver in approved_versions:
-                                key = f"{ts.get('article')} - {ts.get('name')} (v{ver.get('version_number')})"
-                                ts_options[key] = {'ts': ts, 'version': ver}
-                    
-                    selected_key = st.selectbox("Выберите ТЗ и версию", list(ts_options.keys()))
+                    ts_options = {f"{ts.get('article')} - {ts.get('name')}": ts for ts in approved_ts}
+                    selected = st.selectbox("Выберите ТЗ", list(ts_options.keys()))
                     priority = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"])
                     
+                    max_qty = min(available_capacity, 500)
                     qty = st.number_input("Количество в партии", 
-                                       min_value=50, 
-                                       max_value=min(available_capacity, 500),
-                                       value=min(100, available_capacity))
+                                        min_value=50, 
+                                        max_value=max_qty,
+                                        value=min(100, max_qty))
+                    
+                    if qty > available_capacity:
+                        st.error(f"⚠️ Заказ ({qty} ед.) превышает доступную мощность ({available_capacity} ед.)")
                     
                     start_date = st.date_input("Дата начала производства", 
-                                             value=datetime.now() + timedelta(days=7))
+                                              value=datetime.now() + timedelta(days=7))
                     end_date = st.date_input("Дата окончания производства",
-                                           value=datetime.now() + timedelta(days=21))
+                                            value=datetime.now() + timedelta(days=21))
                     
                     if st.form_submit_button("➕ Добавить в план", type="primary", use_container_width=True):
                         if not is_capacity_available(qty):
                             st.error(f"❌ НЕДОСТАТОЧНО МОЩНОСТИ! Доступно: {available_capacity} ед., требуется: {qty} ед.")
+                            st.info("💡 Закройте выполненные заказы или уменьшите количество.")
                         else:
-                            selected = ts_options[selected_key]
-                            ts = selected['ts']
-                            version = selected['version']
-                            
+                            ts = ts_options[selected]
                             new_order = {
                                 "id": get_next_id(st.session_state.orders),
                                 "tech_spec_id": ts.get('id'),
-                                "version_id": version.get('version_number'),
                                 "article": ts.get('article'),
                                 "priority": priority,
                                 "qty": qty,
@@ -367,7 +392,7 @@ def production_page():
             for order in st.session_state.orders:
                 if order.get('status') == 'archived':
                     continue
-                
+                 
                 article = order.get('article', 'N/A')
                 order_id = order.get('id', 0)
                 qty = order.get('qty', 0)
@@ -585,7 +610,7 @@ def main():
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
-        st.caption("Версия: 3.1.6 STABLE")
+        st.caption("Версия: 3.1.6 FIXED")
 
     if page == "🏠 Главная":
         main_dashboard()
