@@ -1,6 +1,6 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 3.2.0 — Добавлено управление версиями и фильтр по приоритетам
+Версия: 3.3.0 — Механизм доработки и обязательные документы
 Автор: Браславцев Б.Э.
 """
 import streamlit as st
@@ -29,7 +29,7 @@ def init_session_state():
         'qc_order': None,
         'notifications': [],
         'selected_production_order': None,
-        'priority_filter': 'Все'  # Новый фильтр приоритетов
+        'confirm_delete_version': None # Для подтверждения удаления версии
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -86,16 +86,6 @@ def get_available_capacity() -> int:
     current_load = calculate_current_load()
     return max(0, MAX_SHOP_CAPACITY - current_load)
 
-def get_version_status_label(status: str) -> str:
-    """Получить читаемое название статуса версии."""
-    labels = {
-        'draft': '📝 Черновик',
-        'on_revision': '🔄 На доработке',
-        'approved': '✅ Утверждено',
-        'archived': '📦 Архив'
-    }
-    return labels.get(status, status)
-
 # ============================================================================
 # === 3. СТРАНИЦЫ ПРИЛОЖЕНИЯ =================================================
 # ============================================================================
@@ -140,96 +130,87 @@ def design_page():
                         st.caption(ts.get('name', ''))
                     with col2:
                         status_emoji = {
-                            "draft": "📝",
-                            "on_revision": "🔄",
-                            "approved": "✅",
-                            "archived": "📦"
+                            "draft": "📝", 
+                            "approved": "✅", 
+                            "archived": "📦",
+                            "revision": "🔄"
                         }.get(ts.get('status', 'draft'), "📄")
-                        st.markdown(f"{status_emoji} **Статус:** {ts.get('status', 'draft')}")
+                        
+                        status_text = ts.get('status', 'draft')
+                        if status_text == 'revision': status_text = "На доработке"
+                        elif status_text == 'draft': status_text = "Черновик"
+                        elif status_text == 'approved': status_text = "Утверждено"
+                        
+                        st.markdown(f"{status_emoji} **Статус:** {status_text}")
                         st.caption(f"Версия: v{ts.get('version', 1)}")
                     with col3:
                         if st.button("📄 Открыть", key=f"open_{ts.get('id')}", use_container_width=True):
                             st.session_state.selected_ts = ts
                             st.rerun()
-                        if ts.get('status') not in ['approved', 'archived']:
-                            if st.button("✅ Утвердить", key=f"app_{ts.get('id')}", use_container_width=True):
-                                ts['status'] = 'approved'
-                                if 'approved_at' not in ts:
-                                    ts['approved_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                st.success(f"ТЗ {ts.get('article')} утверждено")
-                                st.rerun()
+                        
+                        # Кнопки действий в реестре
+                        if ts.get('status') == 'draft':
+                             if st.button("✅ Утвердить", key=f"app_{ts.get('id')}", use_container_width=True):
+                                # Быстрое утверждение из реестра (если есть файлы)
+                                has_tz = any(d['type'] == 'Техническое задание (ТЗ)' for d in ts.get('documents', []))
+                                has_pattern = any(d['type'] == 'Лекала' for d in ts.get('documents', []))
+                                
+                                if has_tz and has_pattern:
+                                    ts['status'] = 'approved'
+                                    st.success(f"ТЗ {ts.get('article')} утверждено")
+                                    st.rerun()
+                                else:
+                                    st.error("Нельзя утвердить без ТЗ и Лекал!")
+                        
                         if st.button("🗑️ Удалить", key=f"del_{ts.get('id')}", use_container_width=True):
                             ts['status'] = 'archived'
                             st.success("ТЗ архивировано")
                             st.rerun()
 
-    # ДЕТАЛИ ТЗ — показ карточки с документами и управлением версиями
+    # ДЕТАЛИ ТЗ — показ карточки с документами и доработкой
     if st.session_state.get('selected_ts'):
         ts = st.session_state.selected_ts
         st.markdown("---")
         st.subheader(f"📦 {ts.get('article', 'N/A')} — {ts.get('name', '')}")
         
-        # Отображение статуса версии
-        status_label = get_version_status_label(ts.get('status', 'draft'))
-        st.info(f"**Текущая версия:** v{ts.get('version', 1)} | **Статус:** {status_label}")
+        # БЛОК ДИНАМИЧЕСКОГО СТАТУСА
+        status = ts.get('status', 'draft')
+        if status == 'approved':
+            st.success("🔒 Утвержденное ТЗ. Редактирование заблокировано.")
+        elif status == 'revision':
+            st.error("🔄 ТЗ отправлено на доработку. См. комментарии ниже.")
         
-        # Блокировка после утверждения
-        if ts.get('status') == 'approved':
-            st.warning("🔒 Утвержденное ТЗ. Для внесения изменений отправьте на доработку.")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("🔄 Отправить на доработку", type="warning", use_container_width=True):
-                    ts['status'] = 'on_revision'
-                    ts['revision_requested_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    ts['revision_requested_by'] = st.session_state.current_user
-                    st.success("ТЗ отправлено на доработку")
-                    st.rerun()
-            with col2:
-                if st.button("📥 Создать новую версию", use_container_width=True):
-                    # Создаем новую версию
-                    new_version = ts.get('version', 1) + 1
-                    ts['version'] = new_version
-                    ts['status'] = 'draft'
-                    ts['created_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    st.success(f"Создана версия v{new_version}")
-                    st.rerun()
-        
-        elif ts.get('status') == 'on_revision':
-            st.warning("🔄 ТЗ находится на доработке")
-            if 'revision_requested_by' in ts:
-                st.caption(f"Запросил: {ts['revision_requested_by']} | {ts.get('revision_requested_at', '')}")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ Утвердить изменения", type="primary", use_container_width=True):
-                    ts['status'] = 'approved'
-                    ts['approved_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    st.success("Изменения утверждены")
-                    st.rerun()
-            with col2:
-                if st.button("📝 Продолжить доработку", use_container_width=True):
-                    ts['status'] = 'draft'
-                    st.info("Режим доработки активирован")
-                    st.rerun()
-        
-        # [R-DE-1] Загрузка документов ТЗ (только если не утверждено или на доработке)
+        # === 1. ЗАГРУЗКА ДОКУМЕНТОВ ===
         st.subheader("📄 Документация ТЗ")
-        if ts.get('status') in ['draft', 'on_revision']:
+        
+        # Проверка обязательных полей
+        has_tz = any(d['type'] == 'Техническое задание (ТЗ)' for d in ts.get('documents', []))
+        has_pattern = any(d['type'] == 'Лекала' for d in ts.get('documents', []))
+        
+        if not has_tz: st.warning("⚠️ Отсутствует обязательный документ: **Техническое задание (ТЗ)**")
+        if not has_pattern: st.warning("⚠️ Отсутствует обязательный документ: **Лекала**")
+        
+        # Форма загрузки (доступна только если не утверждено)
+        if status != 'approved':
             with st.form("upload_ts_doc", clear_on_submit=True):
                 doc_type = st.selectbox("Тип документа", [
-                    "Техническое задание (ТЗ)",
+                    "Техническое задание (ТЗ)", 
                     "Лекала",
-                    "Эскиз",
-                    "Технологическая карта"
+                    "Эскиз (необязательно)", 
+                    "Технологическая карта (необязательно)"
                 ])
                 file = st.file_uploader("Файл (DXF/PDF)", type=['pdf', 'dxf'])
-                if st.form_submit_button("Загрузить", use_container_width=True):
+                
+                submit_label = "Загрузить"
+                if st.form_submit_button(submit_label, use_container_width=True):
                     if file:
                         if file.size > 50 * 1024 * 1024:
                             st.error("Файл > 50 МБ")
                         else:
                             if 'documents' not in ts:
                                 ts['documents'] = []
+                            
+                            # Если загружаем новую версию того же типа, можно заменить, но пока просто добавляем
                             ts['documents'].append({
                                 "type": doc_type,
                                 "filename": file.name,
@@ -238,22 +219,30 @@ def design_page():
                                 "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "uploaded_by": st.session_state.current_user
                             })
+                            
+                            # Если был статус revision, загрузка новых файлов возвращает в draft
+                            if status == 'revision':
+                                ts['status'] = 'draft'
+                                ts['revision_comment'] = None # Очищаем комментарий
+                                st.info("📝 Статус изменен на 'Черновик'. Теперь можно утвердить.")
+                            
                             st.success(f"✅ {doc_type} загружен")
                             st.rerun()
                     else:
                         st.error("Выберите файл")
         else:
             st.info("📌 Загрузка документов заблокирована (ТЗ утверждено)")
-        
-        # Отображение загруженных документов с возможностью скачивания
+
+        # Отображение загруженных документов
         if ts.get('documents'):
             st.write("**Загруженные документы:**")
             for i, doc in enumerate(ts['documents']):
                 col1, col2, col3 = st.columns([4, 1, 1])
                 with col1:
-                    st.caption(f"📄 {doc.get('type', 'Document')} — {doc.get('filename', 'unknown')} ({doc.get('size', 0) / 1024:.1f} KB)")
-                    if 'uploaded_by' in doc:
-                        st.caption(f"Загрузил: {doc['uploaded_by']} | {doc.get('uploaded_at', '')}")
+                    is_required = doc['type'] in ['Техническое задание (ТЗ)', 'Лекала']
+                    req_mark = "🔴" if is_required else "⚪"
+                    st.caption(f"{req_mark} {doc.get('type')} — {doc.get('filename')} ({doc.get('size', 0) / 1024:.1f} KB)")
+                    st.caption(f"Загрузил: {doc.get('uploaded_by')} | {doc.get('uploaded_at')}")
                 with col2:
                     st.download_button(
                         label="⬇️ Скачать",
@@ -264,29 +253,66 @@ def design_page():
                         use_container_width=True
                     )
                 with col3:
-                    if ts.get('status') in ['draft', 'on_revision']:
+                    # Удаление документа (только если не утверждено)
+                    if status != 'approved':
                         if st.button("🗑️", key=f"del_doc_{ts.get('id')}_{i}", help="Удалить документ"):
                             ts['documents'].pop(i)
-                            st.success("Документ удален")
                             st.rerun()
-        
-        # История изменений
+
+        # === 2. БЛОК СОГЛАСОВАНИЯ И ДОРАБОТКИ ===
         st.markdown("---")
-        st.subheader("📜 История изменений")
-        history_data = []
-        if 'created_at' in ts:
-            history_data.append({"Событие": "Создание ТЗ", "Дата": ts['created_at'], "Пользователь": "Система"})
-        if 'approved_at' in ts:
-            history_data.append({"Событие": "Утверждение", "Дата": ts['approved_at'], "Пользователь": ts.get('approved_by', 'Не указан')})
-        if 'revision_requested_at' in ts:
-            history_data.append({"Событие": "Запрос на доработку", "Дата": ts['revision_requested_at'], "Пользователь": ts.get('revision_requested_by', 'Не указан')})
+        st.subheader("🤝 Согласование")
         
-        if history_data:
-            st.table(history_data)
+        if status == 'approved':
+            st.info("ТЗ утверждено. Изменения невозможны.")
+        elif status == 'revision':
+            # Показать комментарий технолога/владельца
+            comment = ts.get('revision_comment', 'Комментарий не указан')
+            st.error(f"💬 **Требование доработки:**\n{comment}")
+            
+            st.info("📝 Загрузите исправленные файлы выше, чтобы вернуть статус в 'Черновик'.")
+        elif status == 'draft':
+            # Форма для утверждения или отправки на доработку
+            col_btn1, col_btn2 = st.columns(2)
+            
+            with col_btn1:
+                # Проверка перед утверждением
+                if not has_tz or not has_pattern:
+                    st.button("✅ Утвердить", disabled=True, use_container_width=True, help="Загрузите ТЗ и Лекала")
+                else:
+                    if st.button("✅ Утвердить", use_container_width=True):
+                        ts['status'] = 'approved'
+                        ts['approved_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        st.success("ТЗ успешно утверждено!")
+                        st.rerun()
+            
+            with col_btn2:
+                if st.button("🔄 На доработку", use_container_width=True):
+                    st.session_state.show_revision_form = True
+                    st.rerun()
         
+        # Форма комментария к доработке (появляется при нажатии кнопки)
+        if st.session_state.get('show_revision_form') and status == 'draft':
+            st.warning("⚠️ Укажите, что нужно исправить:")
+            with st.form("revision_form"):
+                revision_text = st.text_area("Комментарий к доработке", placeholder="Например: 'Добавить припуски на шов в лекале спины'")
+                col_r1, col_r2 = st.columns(2)
+                with col_r1:
+                    if st.form_submit_button("📤 Отправить на доработку", type="primary"):
+                        ts['status'] = 'revision'
+                        ts['revision_comment'] = revision_text
+                        st.session_state.show_revision_form = False
+                        st.success("ТЗ отправлено на доработку")
+                        st.rerun()
+                with col_r2:
+                    if st.form_submit_button("Отмена"):
+                        st.session_state.show_revision_form = False
+                        st.rerun()
+
         # Кнопка закрытия
         if st.button("← Закрыть карточку", key=f"close_{ts.get('id')}"):
             st.session_state.selected_ts = None
+            st.session_state.show_revision_form = False
             st.rerun()
 
     with tab2:
@@ -313,7 +339,8 @@ def design_page():
                         "status": "draft",
                         "version": 1,
                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "documents": []
+                        "documents": [],
+                        "revision_comment": None
                     }
                     st.session_state.tech_specs.append(new_ts)
                     st.success(f"✅ ТЗ {article} создан!")
@@ -322,7 +349,6 @@ def design_page():
 def planning_page():
     """Контекст: Планирование [R-PL-1..7]."""
     st.title("📅 Планирование")
-    
     # [R-PL-1] Только утвержденные ТЗ
     approved_ts = [ts for ts in st.session_state.tech_specs if ts.get('status') == 'approved']
 
@@ -330,24 +356,10 @@ def planning_page():
     current_load = calculate_current_load()
     capacity_pct = get_capacity_percentage()
     available_capacity = get_available_capacity()
-    
-    # === ФИЛЬТР ПО ПРИОРИТЕТАМ ===
-    st.subheader("🔍 Фильтры")
-    col1, col2 = st.columns([2, 2])
-    with col1:
-        priority_filter = st.selectbox(
-            "Приоритет:",
-            options=['Все', 'Высокий', 'Средний', 'Низкий'],
-            index=0,
-            key="priority_filter_select"
-        )
-        st.session_state.priority_filter = priority_filter
-    
-    with col2:
-        st.metric("Загрузка цеха", f"{current_load} / {MAX_SHOP_CAPACITY} ед. ({capacity_pct:.1f}%)")
 
-    # === ФОРМА ИЗМЕНЕНИЯ ПРИОРИТЕТА И ДАТ ===
+    # === ФОРМА ИЗМЕНЕНИЯ ПРИОРИТЕТА И ДАТ — СНАЧАЛА (ДО ТАБОВ) ===
     if st.session_state.editing_order_id is not None:
+        # Найдем заказ по ID
         order_to_edit = None
         for order in st.session_state.orders:
             if order.get('id') == st.session_state.editing_order_id:
@@ -363,6 +375,7 @@ def planning_page():
                 current_idx = priorities.index(current_priority) if current_priority in priorities else 1
                 new_priority = st.selectbox("Новый приоритет", priorities, index=current_idx)
                 
+                # Ручной ввод дат
                 current_start = order_to_edit.get('start_date', datetime.now().strftime("%Y-%m-%d"))
                 current_end = order_to_edit.get('end_date', (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d"))
                 
@@ -389,13 +402,16 @@ def planning_page():
                     if st.form_submit_button("❌ Отмена", use_container_width=True):
                         st.session_state.editing_order_id = None
                         st.rerun()
-            
-            st.markdown("---")
+        
+        st.markdown("---")
 
     tab1, tab2 = st.tabs(["📋 План производства", "➕ Добавить заказ"])
 
     with tab1:
         st.subheader("Календарный план")
+        
+        # ИНДИКАТОР ЗАГРУЗКИ ЦЕХА
+        st.metric("Загрузка цеха", f"{current_load} / {MAX_SHOP_CAPACITY} ед. ({capacity_pct:.1f}%)")
         
         # Визуальная индикация загрузки
         if capacity_pct >= 100:
@@ -411,38 +427,23 @@ def planning_page():
         if not st.session_state.orders:
             st.info("Нет заказов в плане")
         else:
-            # Применяем фильтр по приоритету
-            filtered_orders = st.session_state.orders
-            if st.session_state.priority_filter != 'Все':
-                filtered_orders = [o for o in st.session_state.orders 
-                                  if o.get('priority') == st.session_state.priority_filter]
-            
-            # Показываем только неархивные заказы
-            filtered_orders = [o for o in filtered_orders if o.get('status') != 'archived']
-            
-            if not filtered_orders:
-                st.info(f"Нет заказов с приоритетом '{st.session_state.priority_filter}'")
-            else:
-                st.caption(f"Показано заказов: {len(filtered_orders)}")
-                for order in filtered_orders:
-                    with st.container(border=True):
-                        col1, col2, col3 = st.columns([3, 2, 2])
-                        with col1:
-                            st.markdown(f"**{order.get('article', 'N/A')}**")
-                            priority_emoji = {
-                                "Высокий": "🔴",
-                                "Средний": "🟡",
-                                "Низкий": "🟢"
-                            }.get(order.get('priority', 'Средний'), "⚪")
-                            st.caption(f"Приоритет: {priority_emoji} {order.get('priority', 'Средний')}")
-                            st.info(f"📦 **{order.get('qty', 0)} шт.** в партии")
-                        with col2:
-                            st.caption(f"Начало: {order.get('start_date', 'N/A')}")
-                            st.caption(f"Конец: {order.get('end_date', 'N/A')}")
-                        with col3:
-                            if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
-                                st.session_state.editing_order_id = order.get('id')
-                                st.rerun()
+            for order in st.session_state.orders:
+                if order.get('status') == 'archived':
+                    continue
+                    
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([3, 2, 2])
+                    with col1:
+                        st.markdown(f"**{order.get('article', 'N/A')}**")
+                        st.caption(f"Приоритет: {order.get('priority', 'Средний')}")
+                        st.info(f"📦 **{order.get('qty', 0)} шт.** в партии")
+                    with col2:
+                        st.caption(f"Начало: {order.get('start_date', 'N/A')}")
+                        st.caption(f"Конец: {order.get('end_date', 'N/A')}")
+                    with col3:
+                        if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
+                            st.session_state.editing_order_id = order.get('id')
+                            st.rerun()
 
     with tab2:
         if not approved_ts:
@@ -461,9 +462,9 @@ def planning_page():
                     
                     max_qty = min(available_capacity, 500)
                     qty = st.number_input("Количество в партии", 
-                                        min_value=50, 
-                                        max_value=max_qty,
-                                        value=min(100, max_qty))
+                                       min_value=50, 
+                                       max_value=max_qty,
+                                       value=min(100, max_qty))
                     
                     if qty > available_capacity:
                         st.error(f"⚠️ Заказ ({qty} ед.) превышает доступную мощность ({available_capacity} ед.)")
@@ -509,7 +510,7 @@ def production_page():
             for order in st.session_state.orders:
                 if order.get('status') == 'archived':
                     continue
-                
+                    
                 article = order.get('article', 'N/A')
                 order_id = order.get('id', 0)
                 qty = order.get('qty', 0)
@@ -538,6 +539,7 @@ def production_page():
                             st.session_state.selected_production_order = order
                             st.rerun()
 
+    # ФОРМА ЗАКРЫТИЯ ЗАКАЗА
     if st.session_state.get('selected_production_order'):
         order = st.session_state.selected_production_order
         st.subheader(f"✅ Закрытие заказа: {order.get('article', 'N/A')}")
@@ -587,6 +589,7 @@ def production_page():
                         st.session_state.qc_order = order
                         st.rerun()
         
+        # ФОРМА QC
         if st.session_state.get('qc_order'):
             order = st.session_state.qc_order
             article = order.get('article', 'N/A')
@@ -624,6 +627,7 @@ def production_page():
                     st.session_state.qc_order = None
                     st.rerun()
 
+    # АРХИВ ЗАКАЗОВ
     with tab3:
         st.subheader("📦 Архив завершенных заказов")
         
@@ -729,7 +733,7 @@ def main():
             st.session_state.authenticated = False
             st.session_state.current_user = None
             st.rerun()
-        st.caption("Версия: 3.2.0")
+        st.caption("Версия: 3.3.0 STABLE")
 
     # Роутинг
     if page == "🏠 Главная":
