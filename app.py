@@ -7,11 +7,9 @@ import streamlit as st
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import io
-
 # ============================================================================
 # === 1. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ ========================================
 # ============================================================================
-
 # Константы
 MAX_SHOP_CAPACITY = 500  # Максимальная загрузка цеха в единицах
 WARNING_CAPACITY_THRESHOLD = 0.8  # Порог предупреждения (80%)
@@ -38,7 +36,6 @@ def init_session_state():
 # ============================================================================
 # === 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =============================================
 # ============================================================================
-
 def get_next_id(items: List) -> int:
     """Получить следующий ID."""
     if not items:
@@ -89,7 +86,6 @@ def get_available_capacity() -> int:
 # ============================================================================
 # === 3. СТРАНИЦЫ ПРИЛОЖЕНИЯ =================================================
 # ============================================================================
-
 def login_page():
     """[R-SY-1] Страница входа."""
     st.title("🔐 Вход в систему")
@@ -104,7 +100,6 @@ def login_page():
                 st.rerun()
             else:
                 st.error("Введите логин")
-
     with col2:
         if st.button("Войти как гость", use_container_width=True):
             st.session_state.authenticated = True
@@ -116,7 +111,7 @@ def design_page():
     """Контекст: Конструирование [R-DE-1..7]."""
     st.title("📐 Конструирование")
     tab1, tab2 = st.tabs(["📋 Реестр ТЗ", "➕ Создать ТЗ"])
-
+    
     with tab1:
         st.subheader("Технические задания")
         if not st.session_state.tech_specs:
@@ -150,7 +145,7 @@ def design_page():
                         
                         # Кнопки действий в реестре
                         if ts.get('status') == 'draft':
-                             if st.button("✅ Утвердить", key=f"app_{ts.get('id')}", use_container_width=True):
+                            if st.button("✅ Утвердить", key=f"app_{ts.get('id')}", use_container_width=True):
                                 # Быстрое утверждение из реестра (если есть файлы)
                                 has_tz = any(d['type'] == 'Техническое задание (ТЗ)' for d in ts.get('documents', []))
                                 has_pattern = any(d['type'] == 'Лекала' for d in ts.get('documents', []))
@@ -269,7 +264,6 @@ def design_page():
             # Показать комментарий технолога/владельца
             comment = ts.get('revision_comment', 'Комментарий не указан')
             st.error(f"💬 **Требование доработки:**\n{comment}")
-            
             st.info("📝 Загрузите исправленные файлы выше, чтобы вернуть статус в 'Черновик'.")
         elif status == 'draft':
             # Форма для утверждения или отправки на доработку
@@ -351,12 +345,26 @@ def planning_page():
     st.title("📅 Планирование")
     # [R-PL-1] Только утвержденные ТЗ
     approved_ts = [ts for ts in st.session_state.tech_specs if ts.get('status') == 'approved']
-
+    
     # Расчет загрузки цеха
     current_load = calculate_current_load()
     capacity_pct = get_capacity_percentage()
     available_capacity = get_available_capacity()
-
+    
+    # === ФИЛЬТР ПО СТАТУСУ ЗАКАЗА ===
+    st.subheader("🔍 Фильтр заказов")
+    status_filter = st.selectbox(
+        "Статус заказа",
+        ["Все", "planned", "in_production", "completed", "archived"],
+        format_func=lambda x: {
+            "Все": "Все заказы",
+            "planned": "📋 Запланированные",
+            "in_production": "🏭 В производстве",
+            "completed": "✅ Завершенные",
+            "archived": "📦 Архив"
+        }.get(x, x)
+    )
+    
     # === ФОРМА ИЗМЕНЕНИЯ ПРИОРИТЕТА И ДАТ — СНАЧАЛА (ДО ТАБОВ) ===
     if st.session_state.editing_order_id is not None:
         # Найдем заказ по ID
@@ -402,11 +410,11 @@ def planning_page():
                     if st.form_submit_button("❌ Отмена", use_container_width=True):
                         st.session_state.editing_order_id = None
                         st.rerun()
-        
-        st.markdown("---")
+            
+            st.markdown("---")
 
     tab1, tab2 = st.tabs(["📋 План производства", "➕ Добавить заказ"])
-
+    
     with tab1:
         st.subheader("Календарный план")
         
@@ -427,23 +435,31 @@ def planning_page():
         if not st.session_state.orders:
             st.info("Нет заказов в плане")
         else:
-            for order in st.session_state.orders:
-                if order.get('status') == 'archived':
-                    continue
-                    
-                with st.container(border=True):
-                    col1, col2, col3 = st.columns([3, 2, 2])
-                    with col1:
-                        st.markdown(f"**{order.get('article', 'N/A')}**")
-                        st.caption(f"Приоритет: {order.get('priority', 'Средний')}")
-                        st.info(f"📦 **{order.get('qty', 0)} шт.** в партии")
-                    with col2:
-                        st.caption(f"Начало: {order.get('start_date', 'N/A')}")
-                        st.caption(f"Конец: {order.get('end_date', 'N/A')}")
-                    with col3:
-                        if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
-                            st.session_state.editing_order_id = order.get('id')
-                            st.rerun()
+            # Применяем фильтр по статусу
+            filtered_orders = st.session_state.orders
+            if status_filter != "Все":
+                filtered_orders = [o for o in st.session_state.orders if o.get('status') == status_filter]
+            
+            if not filtered_orders:
+                st.info(f"Нет заказов со статусом '{status_filter}'")
+            else:
+                for order in filtered_orders:
+                    if order.get('status') == 'archived':
+                        continue
+                        
+                    with st.container(border=True):
+                        col1, col2, col3 = st.columns([3, 2, 2])
+                        with col1:
+                            st.markdown(f"**{order.get('article', 'N/A')}**")
+                            st.caption(f"Приоритет: {order.get('priority', 'Средний')}")
+                            st.info(f"📦 **{order.get('qty', 0)} шт.** в партии")
+                        with col2:
+                            st.caption(f"Начало: {order.get('start_date', 'N/A')}")
+                            st.caption(f"Конец: {order.get('end_date', 'N/A')}")
+                        with col3:
+                            if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
+                                st.session_state.editing_order_id = order.get('id')
+                                st.rerun()
 
     with tab2:
         if not approved_ts:
@@ -465,7 +481,7 @@ def planning_page():
                                        min_value=50, 
                                        max_value=max_qty,
                                        value=min(100, max_qty))
-                    
+                     
                     if qty > available_capacity:
                         st.error(f"⚠️ Заказ ({qty} ед.) превышает доступную мощность ({available_capacity} ед.)")
                     
@@ -502,8 +518,6 @@ def production_page():
     tab1, tab2, tab3 = st.tabs(["🧵 Пошив", "🔍 Контроль качества", "📦 Прошлые заказы"])
     
     with tab1:
-        st.info("📌 Пошив доступен только после QC")
-        
         if not st.session_state.orders:
             st.info("Нет заказов.")
         else:
@@ -659,7 +673,6 @@ def main_dashboard():
     st.title("🏭 Система управления предприятием")
     st.success(f"Добро пожаловать, {st.session_state.current_user}!")
     st.markdown("---")
-    
     st.subheader("📊 Оперативная сводка")
 
     col1, col2, col3, col4 = st.columns(4)
