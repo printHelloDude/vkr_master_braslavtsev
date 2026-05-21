@@ -343,27 +343,35 @@ def design_page():
 def planning_page():
     """Контекст: Планирование [R-PL-1..7]."""
     st.title("📅 Планирование")
+    
     # [R-PL-1] Только утвержденные ТЗ
     approved_ts = [ts for ts in st.session_state.tech_specs if ts.get('status') == 'approved']
     
-    # Расчет загрузки цеха
+    # === ФИЛЬТР ЗАКАЗОВ ===
+    st.subheader("🔍 Фильтр заказов")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        priority_filter = st.selectbox(
+            "Приоритет",
+            options=["Все приоритеты", "Высокий", "Средний", "Низкий"],
+            key="priority_filter_select"
+        )
+    
+    # Фильтрация заказов
+    all_orders = st.session_state.orders
+    if priority_filter != "Все приоритеты":
+        filtered_orders = [o for o in all_orders if o.get('priority') == priority_filter and o.get('status') != 'archived']
+    else:
+        filtered_orders = [o for o in all_orders if o.get('status') != 'archived']
+    
+    # Расчет загрузки цеха (для всех активных заказов)
     current_load = calculate_current_load()
     capacity_pct = get_capacity_percentage()
     available_capacity = get_available_capacity()
     
-    # === ФИЛЬТР ПО СТАТУСУ ЗАКАЗА ===
-    st.subheader("🔍 Фильтр заказов")
-    status_filter = st.selectbox(
-        "Статус заказа",
-        ["Все", "planned", "in_production", "completed", "archived"],
-        format_func=lambda x: {
-            "Все": "Все заказы",
-            "planned": "📋 Запланированные",
-            "in_production": "🏭 В производстве",
-            "completed": "✅ Завершенные",
-            "archived": "📦 Архив"
-        }.get(x, x)
-    )
+    # Навигация по табам
+    tab1, tab2 = st.tabs(["📋 План производства", "➕ Добавить заказ"])
     
     # === ФОРМА ИЗМЕНЕНИЯ ПРИОРИТЕТА И ДАТ — СНАЧАЛА (ДО ТАБОВ) ===
     if st.session_state.editing_order_id is not None:
@@ -410,6 +418,120 @@ def planning_page():
                     if st.form_submit_button("❌ Отмена", use_container_width=True):
                         st.session_state.editing_order_id = None
                         st.rerun()
+            
+            st.markdown("---")
+    
+    with tab1:
+        st.subheader("Календарный план")
+        
+        # ИНДИКАТОР ЗАГРУЗКИ ЦЕХА
+        st.metric("Загрузка цеха", f"{current_load} / {MAX_SHOP_CAPACITY} ед. ({capacity_pct:.1f}%)")
+        
+        # Визуальная индикация загрузки
+        if capacity_pct >= 100:
+            st.error(f"🚨 ЦЕХ ПОЛНОСТЬЮ ЗАГРУЖЕН! Доступно: 0 ед.")
+            st.progress(1.0)
+        elif capacity_pct >= WARNING_CAPACITY_THRESHOLD * 100:
+            st.warning(f"⚠️ ВЫСОКАЯ ЗАГРУЗКА! Осталось мест: {available_capacity} ед.")
+            st.progress(capacity_pct / 100)
+        else:
+            st.success(f"✅ Доступно для заказов: {available_capacity} ед.")
+            st.progress(capacity_pct / 100)
+        
+        # Информация о фильтре
+        if priority_filter != "Все приоритеты":
+            st.info(f"📊 Показаны заказы с приоритетом: **{priority_filter}** (всего: {len(filtered_orders)})")
+        else:
+            st.caption(f"Всего активных заказов: {len(filtered_orders)}")
+        
+        if not filtered_orders:
+            if priority_filter != "Все приоритеты":
+                st.warning(f"⚠️ Нет заказов с приоритетом \"{priority_filter}\"")
+            else:
+                st.info("Нет заказов в плане")
+        else:
+            for order in filtered_orders:
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([3, 2, 2])
+                    with col1:
+                        st.markdown(f"**{order.get('article', 'N/A')}**")
+                        
+                        # Индикатор приоритета цветом
+                        priority = order.get('priority', 'Средний')
+                        if priority == "Высокий":
+                            st.error(f"🔴 Приоритет: {priority}")
+                        elif priority == "Средний":
+                            st.warning(f"🟡 Приоритет: {priority}")
+                        else:
+                            st.info(f"🔵 Приоритет: {priority}")
+                        
+                        st.info(f"📦 **{order.get('qty', 0)} шт.** в партии")
+                    
+                    with col2:
+                        st.caption(f"Начало: {order.get('start_date', 'N/A')}")
+                        st.caption(f"Конец: {order.get('end_date', 'N/A')}")
+                    
+                    with col3:
+                        # КНОПКА ИЗМЕНИТЬ ПРИОРИТЕТ — РАБОТАЕТ ВСЕГДА
+                        if st.button("📝 Изменить", key=f"prio_{order.get('id')}", use_container_width=True):
+                            st.session_state.editing_order_id = order.get('id')
+                            st.rerun()
+    
+    with tab2:
+        if not approved_ts:
+            st.warning("⚠️ Нет утвержденных ТЗ")
+        else:
+            # ПРОВЕРКА ДОСТУПНОЙ МОЩНОСТИ
+            if available_capacity <= 0:
+                st.error("🚨 НЕВОЗМОЖНО ДОБАВИТЬ ЗАКАЗ! Цех полностью загружен (500/500 ед.)")
+                st.info("💡 Сначала закройте выполненные заказы или удалите ненужные.")
+            else:
+                st.info(f"✅ Доступно для заказов: {available_capacity} из {MAX_SHOP_CAPACITY} ед.")
+                
+                with st.form("add_order", clear_on_submit=True):
+                    ts_options = {f"{ts.get('article')} - {ts.get('name')}": ts for ts in approved_ts}
+                    selected = st.selectbox("Выберите ТЗ", list(ts_options.keys()))
+                    priority = st.selectbox("Приоритет", ["Высокий", "Средний", "Низкий"])
+                    
+                    # Ограничение по количеству с учетом доступной мощности
+                    max_qty = min(available_capacity, 500)  # Не больше 500 за раз
+                    qty = st.number_input("Количество в партии", 
+                                       min_value=50, 
+                                       max_value=max_qty,
+                                       value=min(100, max_qty))
+                     
+                    # Предупреждение если заказ превышает доступную мощность
+                    if qty > available_capacity:
+                        st.error(f"⚠️ Заказ ({qty} ед.) превышает доступную мощность ({available_capacity} ед.)")
+                    
+                    # РУЧНОЙ ВВОД ДАТ
+                    start_date = st.date_input("Дата начала производства", 
+                                              value=datetime.now() + timedelta(days=7))
+                    end_date = st.date_input("Дата окончания производства",
+                                            value=datetime.now() + timedelta(days=21))
+                    
+                    if st.form_submit_button("➕ Добавить в план", type="primary", use_container_width=True):
+                        # ФИНАЛЬНАЯ ПРОВЕРКА ПЕРЕД ДОБАВЛЕНИЕМ
+                        if not is_capacity_available(qty):
+                            st.error(f"❌ НЕДОСТАТОЧНО МОЩНОСТИ! Доступно: {available_capacity} ед., требуется: {qty} ед.")
+                            st.info("💡 Закройте выполненные заказы или уменьшите количество.")
+                        else:
+                            ts = ts_options[selected]
+                            new_order = {
+                                 "id": get_next_id(st.session_state.orders),
+                                 "tech_spec_id": ts.get('id'),
+                                 "article": ts.get('article'),
+                                 "priority": priority,
+                                 "qty": qty,
+                                 "start_date": start_date.strftime("%Y-%m-%d"),
+                                 "end_date": end_date.strftime("%Y-%m-%d"),
+                                 "status": "planned",
+                                 "qc_status": "pending",
+                                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            st.session_state.orders.append(new_order)
+                            st.success(f"✅ Заказ добавлен в план! Осталось мест: {get_available_capacity()} ед.")
+                            st.rerun()
             
             st.markdown("---")
 
