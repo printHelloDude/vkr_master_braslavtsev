@@ -1,15 +1,17 @@
 """
 Прототип системы управления деятельностью предприятия легкой промышленности
-Версия: 3.3.1 — Исправлена ошибка IndentationError
+Версия: 3.3.1 — Фильтр по приоритету + убрана плашка в Производстве
 Автор: Браславцев Б.Э.
 """
 import streamlit as st
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import io
+
 # ============================================================================
 # === 1. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ ========================================
 # ============================================================================
+
 # Константы
 MAX_SHOP_CAPACITY = 500  # Максимальная загрузка цеха в единицах
 WARNING_CAPACITY_THRESHOLD = 0.8  # Порог предупреждения (80%)
@@ -37,6 +39,7 @@ def init_session_state():
 # ============================================================================
 # === 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =============================================
 # ============================================================================
+
 def get_next_id(items: List) -> int:
     """Получить следующий ID."""
     if not items:
@@ -87,6 +90,7 @@ def get_available_capacity() -> int:
 # ============================================================================
 # === 3. СТРАНИЦЫ ПРИЛОЖЕНИЯ =================================================
 # ============================================================================
+
 def login_page():
     """[R-SY-1] Страница входа."""
     st.title("🔐 Вход в систему")
@@ -195,7 +199,8 @@ def design_page():
                 ])
                 file = st.file_uploader("Файл (DXF/PDF)", type=['pdf', 'dxf'])
                 
-                if st.form_submit_button("Загрузить", use_container_width=True):
+                submit_label = "Загрузить"
+                if st.form_submit_button(submit_label, use_container_width=True):
                     if file:
                         if file.size > 50 * 1024 * 1024:
                             st.error("Файл > 50 МБ")
@@ -398,6 +403,13 @@ def planning_page():
         else:
             st.success(f"✅ Доступно для заказов: {available_capacity} ед.")
             st.progress(capacity_pct / 100)
+
+        # ========================
+        # НОВЫЙ ФИЛЬТР ПО ПРИОРИТЕТУ
+        # ========================
+        st.subheader("🔍 Фильтр по приоритету")
+        priority_options = ["Все", "Высокий", "Средний", "Низкий"]
+        selected_priority = st.selectbox("Выберите статус:", priority_options, label_visibility="collapsed")
         
         if not st.session_state.orders:
             st.info("Нет заказов в плане")
@@ -405,7 +417,12 @@ def planning_page():
             for order in st.session_state.orders:
                 if order.get('status') == 'archived':
                     continue
-                    
+                
+                # Логика фильтрации: если выбрано не "Все", проверяем совпадение приоритета
+                if selected_priority != "Все":
+                    if order.get('priority') != selected_priority:
+                        continue
+                
                 with st.container(border=True):
                     col1, col2, col3 = st.columns([3, 2, 2])
                     with col1:
@@ -477,8 +494,6 @@ def production_page():
     tab1, tab2, tab3 = st.tabs(["🧵 Пошив", "🔍 Контроль качества", "📦 Прошлые заказы"])
     
     with tab1:
-        st.info("📌 Пошив доступен только после QC")
-        
         if not st.session_state.orders:
             st.info("Нет заказов.")
         else:
