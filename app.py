@@ -47,7 +47,7 @@ def get_next_id(items: List) -> int:
     return max(item.get('id', 0) for item in items) + 1
 
 def calculate_defect_rate(defects: int, total: int) -> float:
-    """[R-PR-3] Расчет процента брака."""
+    """[R-PR-2] Расчет процента брака."""
     if total <= 0:
         return 0.0
     return round((defects / total) * 100, 2)
